@@ -10,6 +10,7 @@
 - Linux, macOS and Windows support: platform data folders, launchers for each OS from `duo setup`, no shell scripts.
 
 ### Fixed (found in real runs)
+- Windows short folder names (such as `RUNNER~1`) could send a pair writer outside its worktree when Git expanded the path; both paths are now resolved natively and the selected subfolder must stay inside the repository.
 - A turn could record the previous turn's tool calls and errors when it started within a second of the last one.
 - A Claude seat whose process died between turns failed every later turn with "Session not ready"; it is now restarted on the same conversation.
 - Errors that a retry cannot fix (outdated Claude Code, expired sign-in, unknown model, plan limits) were retried and let the other seats spend quota for minutes; the run now stops at once with a fix hint.

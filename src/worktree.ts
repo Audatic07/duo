@@ -10,8 +10,8 @@
  *             there).
  */
 import { execFileSync, type ExecFileSyncOptions } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { WORKTREES_DIR } from './paths.ts';
 
 export interface Workspace {
@@ -78,12 +78,18 @@ export function prepareWorkspace(cwd: string, runId: string, title: string, mode
     const o = workspaceOptions(cwd);
     if (!o.git || !o.root) throw new Error(`${cwd} is not a git repository; use in-place mode, or run \`git init\` and commit first`);
     if (!o.head) throw new Error(`${o.root} has no commits yet; commit once, or use in-place mode`);
-    const repo = o.root;
+    // Git expands Windows 8.3 names (RUNNER~1), while Node's JS realpath can keep
+    // them. Resolve both paths natively before computing the selected subfolder:
+    // a false ../.. path would otherwise send the writer outside its worktree.
+    const repo = realpathSync.native(o.root);
+    const sub = relative(repo, realpathSync.native(cwd));
+    if (sub === '..' || sub.startsWith(`..${sep}`) || isAbsolute(sub)) {
+      throw new Error(`${cwd} resolves outside its git repository ${repo}`);
+    }
     const base = git(['-C', repo, 'rev-parse', 'HEAD']).trim();
     const branch = `duo/${slug(title)}-${Date.now().toString(36).slice(-5)}`;
     const path = join(WORKTREES_DIR, runId);
     git(['-C', repo, 'worktree', 'add', '-b', branch, path, base]);
-    const sub = relative(repo, cwd);
     return { mode, cwd: sub ? join(path, sub) : path, path, repo, branch, base, state: 'active' };
   }
   // In place: snapshot the folder into a shadow repository that lives in duo's data folder.

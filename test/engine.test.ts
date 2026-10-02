@@ -136,7 +136,8 @@ test('pair: the writer works in a worktree, the reviewer approves, and Apply bri
   assert.equal(m.outcome?.converged, true, String(m.outcome?.stop));
   const ws = m.workspace!;
   assert.equal(ws.mode, 'worktree');
-  const same = (a: string, b: string) => realpathSync(a).toLowerCase() === realpathSync(b).toLowerCase();
+  const same = (a: string, b: string) => realpathSync.native(a).toLowerCase() === realpathSync.native(b).toLowerCase();
+  assert.ok(same(ws.cwd, ws.path), 'selecting the repository root keeps the writer at the worktree root');
   const writerCall = calls().find((c) => c.cli === 'codex' && c.cwd && existsSync(c.cwd) && same(c.cwd, ws.cwd));
   assert.ok(writerCall, `the writer ran in the worktree: ${JSON.stringify({ workspace: ws, calls: calls().slice(-2) })}`);
   assert.ok(existsSync(join(ws.path, 'duo-fake.txt')), `the writer wrote inside the worktree: ${JSON.stringify({ workspace: ws, args: writerCall.args })}`);
