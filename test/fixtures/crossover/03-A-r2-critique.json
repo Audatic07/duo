@@ -1,0 +1,107 @@
+{
+  "answer": "`median([])` should raise `ValueError`: an empty input has no median, and returning `0.0` would make an undefined result look like valid data. Before shipping, make both `median` and `average` raise `ValueError` on empty input, so the module has consistent behavior without treating zero as a statistical answer. Also fix `median` for even-length inputs: it currently returns the upper middle value instead of averaging the two middle values. The existing `average` docstring must be updated to describe the exception behavior.",
+  "claims": [
+    {
+      "id": "c1",
+      "text": "The module documents that average of an empty list is 0.0, but currently returns integer 0.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:2-4",
+          "quote": "0.0 for an empty list."
+        }
+      ]
+    },
+    {
+      "id": "c2",
+      "text": "median([]) currently raises IndexError because it indexes the empty sorted list at index zero.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:8-10",
+          "quote": "return s[len(s) // 2]"
+        }
+      ]
+    },
+    {
+      "id": "c3",
+      "text": "For a nonempty even-length input, median currently returns the upper middle element instead of averaging the two middle elements.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:9-10",
+          "quote": "return s[len(s) // 2]"
+        }
+      ]
+    },
+    {
+      "id": "c4",
+      "text": "The module should use an exception for empty inputs because an empty list has no statistical mean or median; returning zero risks being interpreted as a computed result.",
+      "kind": "judgment",
+      "confidence": 0.88,
+      "evidence": [
+        {
+          "type": "reasoning",
+          "ref": "empty-input-semantics",
+          "quote": null
+        }
+      ]
+    },
+    {
+      "id": "c5",
+      "text": "Before shipping, make both functions raise ValueError on empty inputs, update average's docstring, and fix median's even-length calculation.",
+      "kind": "judgment",
+      "confidence": 0.94,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:1-10",
+          "quote": "def average(xs):"
+        }
+      ]
+    }
+  ],
+  "stances": [
+    {
+      "claim": "B:c1",
+      "stance": "agree",
+      "reason": "The implementation sorts the empty input and accesses index zero, which raises IndexError (stats.py:8-10)."
+    },
+    {
+      "claim": "B:c2",
+      "stance": "agree",
+      "reason": "The docstring says 0.0 while the explicit empty-list branch returns 0 (stats.py:2-4)."
+    },
+    {
+      "claim": "B:c3",
+      "stance": "agree",
+      "reason": "Median of an empty input is undefined; returning zero would silently present a sentinel as a statistic."
+    },
+    {
+      "claim": "B:c4",
+      "stance": "agree",
+      "reason": "An explicit ValueError communicates invalid empty input more clearly than returning a plausible numeric result."
+    },
+    {
+      "claim": "B:c5",
+      "stance": "agree",
+      "reason": "Changing average too gives both functions one consistent empty-input policy, and the docstring should be updated to match."
+    }
+  ],
+  "concessions": [
+    "I change my recommendation from returning 0.0 for median([]) to raising ValueError. The argument that zero would represent an undefined median as if it were a valid statistic persuaded me; consistency with average is better achieved by correcting average's empty-input policy too."
+  ],
+  "verdict": "agree",
+  "open_points": [],
+  "assumptions": [
+    "The module's intended statistical behavior should represent undefined empty-input results with exceptions rather than sentinel numbers.",
+    "A consistent API warrants changing average alongside median, although the brief focuses on median. The average behavior and docstring are present in stats.py:1-5."
+  ],
+  "confidence": 0.88
+}

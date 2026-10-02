@@ -1,0 +1,15 @@
+name: Feature request
+description: Suggest an improvement or a new mode
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem first; a proposed solution is welcome but optional.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea

@@ -1,0 +1,10 @@
+node_modules/
+gui/dist/
+.claude/
+*.log
+.DS_Store
+Thumbs.db
+coverage/
+dist/
+out/
+desktop/icon.ico

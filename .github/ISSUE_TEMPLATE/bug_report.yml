@@ -1,0 +1,33 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The mode (chat, pair, debate…), the seats (e.g. codex:gpt-6-sol@high), and what you did.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `duo doctor`
+      render: text
+  - type: textarea
+    id: trace
+    attributes:
+      label: Run trace (if a run misbehaved)
+      description: Output of `duo trace <run>`. Remove anything private from prompts or paths first.
+      render: text
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04, macOS 15, Windows 11

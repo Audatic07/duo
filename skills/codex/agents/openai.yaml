@@ -1,0 +1,7 @@
+interface:
+  display_name: "duo"
+  short_description: "Traceable Claude x Codex debates and reviews"
+  default_prompt: "Use $duo to debate this between claude:opus@high and codex:gpt-6-sol@high and report where they agree."
+
+policy:
+  allow_implicit_invocation: true

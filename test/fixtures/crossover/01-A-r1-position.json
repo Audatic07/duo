@@ -1,0 +1,84 @@
+{
+  "answer": "`median([])` should return `0.0`, following the module’s stated empty-input convention for `average`. Before shipping, change `median` to return `0.0` for empty input and to average the two middle values for even-length input; as written, it raises `IndexError` for empty input and returns the upper middle value for even-length input. Also change `average([])` to return `0.0` rather than integer `0`, so its implementation matches its documented return value. Add coverage for empty, odd-length, and even-length inputs.",
+  "claims": [
+    {
+      "id": "c1",
+      "text": "The module documents that average of an empty list is 0.0, but currently returns integer 0.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:2-4",
+          "quote": "0.0 for an empty list."
+        }
+      ]
+    },
+    {
+      "id": "c2",
+      "text": "median([]) currently raises IndexError because it indexes the empty sorted list at index zero.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:8-10",
+          "quote": "return s[len(s) // 2]"
+        }
+      ]
+    },
+    {
+      "id": "c3",
+      "text": "For a nonempty even-length input, median currently returns the upper middle element instead of averaging the two middle elements.",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:9-10",
+          "quote": "return s[len(s) // 2]"
+        }
+      ]
+    },
+    {
+      "id": "c4",
+      "text": "The module should consistently define the empty-list result for both functions as 0.0; this is the best fit with average's explicit documented convention.",
+      "kind": "judgment",
+      "confidence": 0.83,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:2-4",
+          "quote": "Mean of a list of numbers; 0.0 for an empty list."
+        }
+      ]
+    },
+    {
+      "id": "c5",
+      "text": "Before shipping, update average to return 0.0 exactly, handle the empty input in median with 0.0, and correct median's even-length calculation; add tests covering empty, odd, and even inputs.",
+      "kind": "judgment",
+      "confidence": 0.96,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:1-10",
+          "quote": "def average(xs):"
+        },
+        {
+          "type": "file",
+          "ref": "stats.py:8-10",
+          "quote": "def median(xs):"
+        }
+      ]
+    }
+  ],
+  "stances": [],
+  "concessions": [],
+  "verdict": "n/a",
+  "open_points": [],
+  "assumptions": [
+    "The stated 0.0 empty-input behavior for average represents the intended module convention.",
+    "The usual statistical definition of median applies to nonempty inputs, including averaging the two center values when the input length is even."
+  ],
+  "confidence": 0.88
+}

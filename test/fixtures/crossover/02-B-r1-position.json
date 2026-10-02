@@ -1,0 +1,83 @@
+{
+  "answer": "**Position:** `median([])` should raise an exception, not return 0.0. While `average([])` currently returns 0, that is a design flaw that `median()` should not replicate. Returning 0 for an undefined statistical quantity masks errors and invites bugs. The module should fail loudly on invalid input.\n\n**Recommended fix:** Change `median()` to check for empty input and raise `ValueError` (or similar). Ideally, also fix `average()` to raise instead of returning 0, but at minimum, `median()` must not compound the existing error by silently returning false data.\n\n**Exact change required:**\n```python\ndef median(xs):\n    if not xs:\n        raise ValueError(\"median of empty list is undefined\")\n    s = sorted(xs)\n    return s[len(s) // 2]\n```",
+  "claims": [
+    {
+      "id": "c1",
+      "text": "median([]) currently raises IndexError due to empty list access",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:8-10",
+          "quote": "def median(xs):\n    s = sorted(xs)\n    return s[len(s) // 2]"
+        }
+      ]
+    },
+    {
+      "id": "c2",
+      "text": "average([]) explicitly returns 0 with documented intent to handle empty lists",
+      "kind": "fact",
+      "confidence": 1,
+      "evidence": [
+        {
+          "type": "file",
+          "ref": "stats.py:1-5",
+          "quote": "def average(xs):\n    \"\"\"Mean of a list of numbers; 0.0 for an empty list.\"\"\"\n    if xs == []:\n        return 0"
+        }
+      ]
+    },
+    {
+      "id": "c3",
+      "text": "Returning 0 for median of empty list is statistically wrong and masks errors",
+      "kind": "judgment",
+      "confidence": 0.95,
+      "evidence": [
+        {
+          "type": "reasoning",
+          "ref": "statistical_semantics",
+          "quote": "The median of an empty set is undefined; returning 0 is false data, not a sentinel. This invites silent data corruption bugs."
+        }
+      ]
+    },
+    {
+      "id": "c4",
+      "text": "Failing loudly (raising) is better than failing silently for statistical functions",
+      "kind": "judgment",
+      "confidence": 0.9,
+      "evidence": [
+        {
+          "type": "reasoning",
+          "ref": "fail_fast_principle",
+          "quote": "Silent failures in data processing hide bugs. Exception-on-invalid-input forces detection and handling."
+        }
+      ]
+    },
+    {
+      "id": "c5",
+      "text": "The right long-term fix is for both functions to raise on empty input, not for median to copy average's flaw",
+      "kind": "judgment",
+      "confidence": 0.85,
+      "evidence": [
+        {
+          "type": "reasoning",
+          "ref": "design_correctness",
+          "quote": "Consistency is valuable, but both functions have undefined behavior on empty input. Consistency at the level of correct semantics beats consistency at the level of propagating errors."
+        }
+      ]
+    }
+  ],
+  "stances": [],
+  "concessions": [],
+  "verdict": "n/a",
+  "open_points": [
+    "Whether the priority is strict consistency with average() (favors returning 0.0) versus statistical correctness (favors raising). The brief frames it as consistency vs. exception, which may indicate the requirement is matching average().",
+    "Whether fixing average() at the same time is acceptable or if it's out of scope (the brief only asks about median)."
+  ],
+  "assumptions": [
+    "Empty input is invalid for both median and average, not a valid edge case to support.",
+    "Fail-fast is preferred over fail-silent in data processing pipelines.",
+    "The module is not locked into backward compatibility (no indication of it being in production)."
+  ],
+  "confidence": 0.75
+}
