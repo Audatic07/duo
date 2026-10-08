@@ -9,6 +9,7 @@ import type { CitationResult } from './citations.ts';
 import type { ClaimLedger, LedgerClaim } from './ledger.ts';
 import type { DebateTurn, ReviewTurn } from './schemas.ts';
 import { seatPeerName, type Seat } from './seats.ts';
+import { LEDGER_REVIEW_PROMPT } from './templates/operations.ts';
 
 export interface RulesContext {
   protocol: string;
@@ -144,6 +145,27 @@ export function debateRound(
     '5. open_points: what still separates you, each with the evidence or test that would settle it.',
   );
   return out.join('\n');
+}
+
+/** Every participant reviews the same final claims and answers; no further revisions are allowed. */
+export function debateLedgerContext(me: Seat, seats: Seat[], latest: Record<string, DebateTurn>, ledger: ClaimLedger, anon: boolean, graded = false): Record<string, string> {
+  const positions: string[] = [];
+  for (const seat of seats) {
+    const t = latest[seat.id];
+    if (t) positions.push(`<participant id="${seat.id}" name="${participantName(seat, anon)}">`, t.answer.trim(), '</participant>');
+  }
+  const claims: string[] = [];
+  for (const c of ledger.active()) {
+    claims.push(...claimLines([c], ledger));
+    for (const [seat, stance] of Object.entries(c.stances)) claims.push(`    ${seat}: ${stance.stance} — ${stance.reason}`);
+  }
+  const required = ledger.active().filter((c) => c.owner !== me.id).map((c) => c.gid);
+  return { finalPositions: positions.join('\n'), claimLedger: claims.join('\n'), requiredClaims: required.join(', ') || '(none)', seat: me.id,
+    decisions: graded ? '"agree", "partial", "disagree" or "unsure"' : 'only "agree" or "disagree" (choose "disagree" for partial agreement or uncertainty)' };
+}
+
+export function debateLedgerReview(context: Record<string, string>): string {
+  return LEDGER_REVIEW_PROMPT.replace(/\{\{(\w+)\}\}/g, (_, key: string) => context[key] ?? '');
 }
 
 export function chairBrief(protocol: string, brief: string, body: string, participants: string): string {

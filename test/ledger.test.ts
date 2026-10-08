@@ -66,3 +66,37 @@ test('a materially changed claim loses its old stances', () => {
   l.update('A', 2, turn([['c1', 'p, but different']], [], 'agree'));
   assert.equal(l.status(l.claims.get('A:c1')!), 'unaddressed');
 });
+
+test('final reviews require complete binary stances with reasons on active peer claims', () => {
+  const l = new ClaimLedger(['A', 'B', 'AA'], WS);
+  l.update('A', 1, turn([['c1', 'a']], [], 'n/a'));
+  l.update('B', 1, turn([['c1', 'b'], ['c2', 'withdrawn']], [], 'n/a'));
+  l.update('AA', 1, turn([['c1', 'aa']], [], 'n/a'));
+  l.update('B', 2, turn([['c1', 'b']], [], 'agree'));
+  const valid = () => turn([], [['B:c1', 'agree'], ['AA:c1', 'disagree']], 'partial');
+  assert.equal(l.reviewError('A', valid()), undefined);
+  const missing = valid(); missing.stances.pop();
+  assert.match(l.reviewError('A', missing)!, /AA:c1/);
+  for (const stance of ['partial', 'unsure']) {
+    const t = valid(); t.stances[0].stance = stance;
+    assert.match(l.reviewError('A', t)!, /agree or disagree/);
+  }
+  const duplicate = valid(); duplicate.stances.push(duplicate.stances[0]);
+  assert.match(l.reviewError('A', duplicate)!, /exactly one stance/);
+  for (const claim of ['A:c1', 'B:c2', 'B:unknown']) {
+    const t = valid(); t.stances[0].claim = claim;
+    assert.match(l.reviewError('A', t)!, /active peer claim/);
+  }
+  const reason = valid(); reason.stances[0].reason = ' ';
+  assert.match(l.reviewError('A', reason)!, /give a reason/);
+  const changed = valid(); changed.claims = turn([['c3', 'new']], [], 'agree').claims;
+  assert.match(l.reviewError('A', changed)!, /frozen/);
+  const withdrawn = valid(); withdrawn.concessions = ['drop my claim'];
+  assert.match(l.reviewError('A', withdrawn)!, /frozen/);
+  const verdict = valid(); verdict.verdict = 'n/a';
+  assert.match(l.reviewError('A', verdict)!, /final verdict/);
+  l.review('A', 3, valid());
+  assert.equal(l.claims.get('A:c1')!.withdrawn, false);
+  assert.equal(l.claims.get('AA:c1')!.stances.A.stance, 'disagree');
+  assert.throws(() => l.review('A', 3, missing), /AA:c1/);
+});

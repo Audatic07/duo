@@ -19,6 +19,7 @@ const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 
 app.setName('Duo');
+if (SMOKE && process.env.DUO_SMOKE_USER_DATA) app.setPath('userData', process.env.DUO_SMOKE_USER_DATA);
 if (typeof app.setDesktopName === 'function') app.setDesktopName('duo.desktop');
 if (process.platform === 'linux') {
   // Native Wayland when available, with window decorations.
@@ -94,7 +95,7 @@ function preferredPort() {
 
 function startEngine() {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, ...shellEnv() };
+    const env = SMOKE ? { ...process.env } : { ...process.env, ...shellEnv() };
     delete env.ELECTRON_RUN_AS_NODE;
     const node = findNode(env);
     if (!node) {
@@ -132,8 +133,9 @@ function startEngine() {
       errTail = (errTail + d).slice(-4000);
       process.stderr.write(d);
     });
-    server.on('error', (e) => reject(new Error(`could not run ${node}: ${e.message}`)));
+    server.on('error', (e) => { clearTimeout(timer); reject(new Error(`could not run ${node}: ${e.message}`)); });
     server.on('exit', (code, signal) => {
+      clearTimeout(timer);
       if (!origin) {
         reject(new Error(`the duo engine exited (${code ?? signal}).\n\n${errTail}`));
         return;
@@ -210,7 +212,7 @@ async function createWindow() {
   await win.loadURL(`${origin}/#${token}`);
   if (SMOKE) {
     await new Promise((r) => setTimeout(r, 4000));
-    const ok = await win.webContents.executeJavaScript("!!document.querySelector('.app') && document.title");
+    const ok = await win.webContents.executeJavaScript("document.title === 'Duo' && !!document.querySelector('.app .hero-composer textarea') && !!document.querySelector('.sidebar')");
     process.stdout.write(`DUO_DESKTOP_SMOKE ${ok ? 'OK ' + ok : 'FAILED'}\n`);
     quitting = true;
     await stopEngine();
@@ -244,7 +246,8 @@ ipcMain.handle('duo:notify', (_e, o) => {
 });
 
 app.whenReady().then(createWindow).catch((e) => {
-  dialog.showErrorBox('Duo could not start', String((e && e.message) || e));
+  if (SMOKE) process.stderr.write(`Duo could not start: ${String((e && e.message) || e)}\n`);
+  else dialog.showErrorBox('Duo could not start', String((e && e.message) || e));
   app.exit(1);
 });
 app.on('second-instance', () => {

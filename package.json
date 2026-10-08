@@ -1,6 +1,6 @@
 {
   "name": "duo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Claude Code and Codex in one desktop app: chat with either, run them side by side, or let them pair-program, debate and review each other.",
   "keywords": [
@@ -32,7 +32,9 @@
     "gui": "node bin/duo.js gui",
     "smoke": "node scripts/smoke.mjs",
     "build": "node -e \"import('./src/server/build.ts').then(m=>m.buildGui(true))\"",
-    "postinstall": "node node_modules/electron/install.js"
+    "postinstall": "node node_modules/electron/install.js",
+    "release:bundle": "node scripts/release.mjs",
+    "release:prepare": "npm run check && npm run build && npm run release:bundle"
   },
   "dependencies": {
     "@enderfga/claw-orchestrator": "7.6.0",

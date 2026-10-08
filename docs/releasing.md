@@ -1,0 +1,9 @@
+# Preparing a GitHub release
+
+Update the version in `package.json` and both version fields in `package-lock.json`, promote the changelog section, and write `docs/releases/VERSION.md`. Source releases require Node.js 22.18+ and Git. They include a prebuilt GUI and a lockfile; Electron and other dependencies are installed with `npm ci` on the user's platform.
+
+Run `npm run release:prepare`. It type-checks the engine and GUI, runs the full fake-provider regression suite, rebuilds the GUI, and assembles `dist/duo-VERSION-source.tar.gz`, `SHA256SUMS` and `release-notes.md`. No tag, commit or GitHub release is created. The bundler requires `tar`, available on Linux, macOS and current Windows versions. Validate the archive from a clean extraction with `npm ci`, `npm run check`, and `node bin/duo.js --version`.
+
+Run `npm run smoke` for an isolated Electron startup check. It uses temporary data, preferences and fake model CLIs, opens no visible window and sends no real model requests. Linux CI uses `xvfb-run -a npm run smoke -- --no-sandbox`; the flag is only for the test shell on hosts that cannot run Chromium's sandbox. The installed app retains its normal sandbox. Browser checks should cover the custom builder, JSON round-trip/discard, saving/loading/deleting, AI draft/revision, a completed custom run and both themes. A live sign-in check can be run explicitly from Settings before publishing.
+
+Once reviewed, commit the release changes, create `vVERSION` on that commit, and push the tag. The Release workflow checks Linux, macOS and Windows on Node 22 and 24, builds the bundle, performs the Linux desktop smoke check and creates a **draft** GitHub release. Inspect its checks, assets and notes before publishing it in GitHub. The workflow refuses a tag that disagrees with `package.json` and never automatically publishes the draft.

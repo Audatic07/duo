@@ -80,6 +80,20 @@ export function Spinner({ size = 14 }: { size?: number }) {
   return <span class="spinner" style={{ width: size, height: size }} aria-label="working" />;
 }
 
+/** Keep a temporary blank while editing, instead of inserting a default between keystrokes. */
+export function IntegerInput({ value, onChange, min = 1, max = 12 }: { value: number; onChange: (n: number) => void; min?: number; max?: number }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  return <input type="number" min={min} max={max} step={1} required value={text} onInput={(e) => {
+    setText(e.currentTarget.value);
+    if (e.currentTarget.validity.valid) onChange(e.currentTarget.valueAsNumber);
+  }} onBlur={() => {
+    const n = text.trim() ? Number(text) : value;
+    const next = Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : value;
+    setText(String(next)); onChange(next);
+  }} />;
+}
+
 export function EngineDot({ engine }: { engine: Engine }) {
   return <span class={`dot dot-${engine}`} title={engine === 'claude' ? 'Claude' : 'Codex'} />;
 }

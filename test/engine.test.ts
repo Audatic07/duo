@@ -68,7 +68,7 @@ test('debate: each turn records only its own tool calls (no carry-over from the 
   await debate(ctx);
   const m = ctx.store.meta;
   const codexTurns = m.turns.filter((t) => t.seat === 'A');
-  assert.equal(codexTurns.length, 2);
+  assert.equal(codexTurns.length, 3, 'two discussion rounds and a final ledger review');
   for (const t of codexTurns) {
     const tools = JSON.parse(readFileSync(join(ctx.store.dir, t.dir, 'tools.json'), 'utf8'));
     assert.equal(tools.length, 1, `turn ${t.n} has exactly its own one command`);
@@ -114,7 +114,7 @@ test('a Claude process that died between turns is restarted on the same conversa
     await debate(ctx);
     const m = ctx.store.meta;
     const claudeTurns = m.turns.filter((t) => t.seat === 'A');
-    assert.equal(claudeTurns.length, 2);
+    assert.equal(claudeTurns.length, 3, 'the recovered conversation also completes its ledger review');
     assert.ok(claudeTurns.every((t) => !t.error), JSON.stringify(claudeTurns.map((t) => t.error)));
     const resumed = calls().filter((c) => c.cli === 'claude' && c.args?.includes('--resume'));
     assert.ok(resumed.length >= 1, 'restarted with --resume');
@@ -146,4 +146,39 @@ test('pair: the writer works in a worktree, the reviewer approves, and Apply bri
   assert.ok(r.ok, r.message);
   assert.ok(existsSync(join(repo, 'duo-fake.txt')), 'applied to the user folder');
   assert.ok(!existsSync(ws.path), 'the worktree is gone');
+});
+
+test('continued ask and debate runs retain their template snapshot and model sessions', async () => {
+  const { continueRun } = await import('../src/protocols/continue.ts');
+  for (const protocol of ['ask', 'debate']) {
+    const ctx = ctxFor(protocol, ['codex:gpt-6-sol@low', 'claude:sonnet@low']);
+    if (protocol === 'ask') await ask(ctx); else await debate(ctx);
+    let next: ReturnType<typeof RunContext.create> | undefined;
+    await continueRun(cfg, ctx.store.meta.id, 'Focus on the unresolved constraint', { rounds: 2, quiet: true, safe: false, onContext: (c) => { next = c; } });
+    assert.equal(next!.store.meta.status, 'completed');
+    assert.deepEqual(next!.store.meta.options.template, ctx.store.meta.options.template);
+    for (const seat of ctx.store.meta.seats.filter((s) => s.role === 'participant')) {
+      const resumed = next!.store.meta.seats.find((s) => s.id === seat.id && s.role === 'participant')!;
+      assert.equal(resumed.codexThreadId, seat.codexThreadId); assert.equal(resumed.claudeSessionId, seat.claudeSessionId);
+    }
+    assert.ok(next!.store.meta.turns[0].round > ctx.store.meta.turns[0].round);
+  }
+});
+test('a copied pair template continues on the same workspace with the same definition', async () => {
+  const { continueRun } = await import('../src/protocols/continue.ts');
+  const { builtinTemplate } = await import('../src/templates/builtins.ts');
+  const repo = join(tmp, 'continued-pair');
+  execFileSync('git', ['init', '-q', repo]); writeFileSync(join(repo, 'README.md'), '# demo\n');
+  execFileSync('git', ['-C', repo, 'add', '-A']);
+  execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']);
+  const ctx = ctxFor('pair', ['codex:gpt-6-sol@low', 'claude:sonnet@low'], { cwd: repo, rounds: 1 });
+  ctx.opts.extra.template = { ...builtinTemplate('pair'), id: 'pair-copy' };
+  await pair(ctx, { isolation: 'worktree', writerAccess: 'sandboxed' });
+  let next: ReturnType<typeof RunContext.create> | undefined;
+  await continueRun(cfg, ctx.store.meta.id, 'Check the existing implementation again', { rounds: 1, quiet: true, safe: false, onContext: (c) => { next = c; } });
+  assert.equal(next!.store.meta.status, 'completed');
+  assert.deepEqual(next!.store.meta.options.template, ctx.store.meta.options.template);
+  assert.equal(next!.store.meta.workspace!.path, ctx.store.meta.workspace!.path);
+  assert.equal(next!.store.meta.turns[0].round, 2);
+  const result = finishWorkspace(next!.store.meta.workspace!, 'discard', next!.store.meta.title); assert.ok(result.ok, result.message);
 });

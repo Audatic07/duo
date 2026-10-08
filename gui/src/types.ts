@@ -1,5 +1,6 @@
+import type { CoordinationTemplate, WorkflowState } from '../../src/templates/types.ts';
 export type Engine = 'claude' | 'codex';
-export type Protocol = 'debate' | 'review' | 'council' | 'ask' | 'pair';
+export type Protocol = 'debate' | 'review' | 'council' | 'ask' | 'pair' | 'custom';
 
 export interface Block {
   id: string;
@@ -74,8 +75,8 @@ export interface QuotaWindow {
 }
 
 export interface QuotaSnapshot {
-  codex?: { windows: QuotaWindow[]; plan?: string; asOf: number; limitReached?: string | null };
-  claude?: { windows: QuotaWindow[]; status?: string; asOf: number };
+  codex?: { windows: QuotaWindow[]; plan?: string; asOf: number; limitReached?: string | null; };
+  claude?: { windows: QuotaWindow[]; status?: string; asOf: number; };
 }
 
 export interface CodexModel {
@@ -96,9 +97,9 @@ export interface RunSummary {
   finishedAt?: string;
   seats: string[];
   outcome?: Record<string, any>;
-  totals?: Usage & { codexCredits: number; usd: number; durationMs: number; turns: number };
+  totals?: Usage & { codexCredits: number; usd: number; durationMs: number; turns: number; };
   continuedFrom?: string;
-  workspace?: { mode: 'worktree' | 'in-place'; state: string; branch?: string };
+  workspace?: { mode: 'worktree' | 'in-place'; state: string; branch?: string; };
 }
 
 export interface RunTurnMeta {
@@ -135,7 +136,8 @@ export interface SeatRecord {
   engine: Engine;
   model: string;
   effort?: string;
-  role: 'participant' | 'chair' | 'reviewer' | 'writer';
+  role: string;
+  customRole?: boolean;
   codexThreadId?: string;
   claudeSessionId?: string;
 }
@@ -150,24 +152,24 @@ export interface PairFinding {
   opened: number;
   status: 'open' | 'resolved';
   disputes: number;
-  history: { cycle: number; event: string; note?: string }[];
+  history: { cycle: number; event: string; note?: string; }[];
 }
 
 export interface PairCycle {
   cycle: number;
-  writer?: { n: number; status: string; summary: string; changes: number; tests: { command: string; outcome: string; details: string }[]; error?: string };
-  check?: { exitCode: number | null; timedOut: boolean; durationMs: number };
-  diff?: { files: number; stat: string };
-  review?: { n: number; verdict: string; summary: string; open: number; blocking: number; requirements: { requirement: string; met: string; evidence: string }[]; error?: string };
+  writer?: { n: number; status: string; summary: string; changes: number; tests: { command: string; outcome: string; details: string; }[]; error?: string; };
+  check?: { exitCode: number | null; timedOut: boolean; durationMs: number; };
+  diff?: { files: number; stat: string; };
+  review?: { n: number; verdict: string; summary: string; open: number; blocking: number; requirements: { requirement: string; met: string; evidence: string; }[]; error?: string; };
 }
 
 export interface PairState {
-  settings: { isolation: 'worktree' | 'in-place'; writerAccess: string; check?: string };
+  settings: { isolation: 'worktree' | 'in-place'; writerAccess: string; check?: string; };
   writer: string;
   reviewer: string;
   cycles: PairCycle[];
   findings: PairFinding[];
-  checks: { cycle: number; command: string; exitCode: number | null; output: string; durationMs: number; timedOut: boolean }[];
+  checks: { cycle: number; command: string; exitCode: number | null; output: string; durationMs: number; timedOut: boolean; }[];
 }
 
 export interface RunDetails {
@@ -186,7 +188,7 @@ export interface RunDetails {
     turns: RunTurnMeta[];
     outcome?: Record<string, any>;
     totals?: RunSummary['totals'];
-    quota?: { before?: QuotaSnapshot; after?: QuotaSnapshot };
+    quota?: { before?: QuotaSnapshot; after?: QuotaSnapshot; };
     continuedFrom?: string;
     workspace?: Workspace;
   };
@@ -197,6 +199,9 @@ export interface RunDetails {
   findings?: any[];
   council?: any;
   pair?: PairState;
+  template?: CoordinationTemplate;
+  draftTemplate?: CoordinationTemplate;
+  coordination?: WorkflowState;
   dir: string;
 }
 
@@ -221,8 +226,8 @@ export interface Preset {
 }
 
 export interface GuiDefaults {
-  claude: { spec: string; access: string };
-  codex: { spec: string; access: string; useConfig: boolean };
+  claude: { spec: string; access: string; };
+  codex: { spec: string; access: string; useConfig: boolean; };
   theme: 'system' | 'light' | 'dark';
   notify: boolean;
 }
@@ -233,7 +238,7 @@ export interface Prefs {
   right?: 'none' | 'changes' | 'trace';
   sidebar?: boolean;
   sidebarFilter?: 'all' | 'chats' | 'runs';
-  lastSeats?: Partial<Record<Protocol, { seats: string[]; chair?: string }>>;
+  lastSeats?: Partial<Record<Protocol, { seats: string[]; chair?: string; }>>;
   seenTour?: boolean;
 }
 
@@ -254,13 +259,13 @@ export interface AppState {
   configPath: string;
   gui: GuiDefaults;
   presets: Record<string, Preset>;
-  defaults: { preset: string; codexModel: string; claudeModel: string };
+  defaults: { preset: string; codexModel: string; claudeModel: string; };
   warnPercent: number;
-  access: { claude: Record<string, string>; codex: Record<string, string> };
-  models: { codex: CodexModel[]; claude: { alias: string; note: string }[] };
+  access: { claude: Record<string, string>; codex: Record<string, string>; };
+  models: { codex: CodexModel[]; claude: { alias: string; note: string; }[]; };
   rates: Record<string, [number, number, number]>;
-  efforts: { codex: string[]; claude: string[] };
-  versions: { codex: string; claude: string };
+  efforts: { codex: string[]; claude: string[]; };
+  versions: { codex: string; claude: string; };
   quota: QuotaSnapshot;
   chats: ChatSummary[];
   runs: RunSummary[];
@@ -271,6 +276,7 @@ export interface AppState {
 
 export interface StartRun {
   protocol: Protocol;
+  template?: CoordinationTemplate | string;
   seats: string[];
   chair?: string;
   rounds?: number;
@@ -280,6 +286,6 @@ export interface StartRun {
   noProject?: boolean;
   brief?: string;
   title?: string;
-  review?: { kind: 'uncommitted' | 'base' | 'commit' | 'files' | 'plan'; value?: string; files?: string[]; focus?: string };
-  pair?: { isolation: 'worktree' | 'in-place'; writerAccess: 'sandboxed' | 'sandboxed-network' | 'full'; check?: string };
+  review?: { kind: 'uncommitted' | 'base' | 'commit' | 'files' | 'plan'; value?: string; files?: string[]; focus?: string; };
+  pair?: { isolation: 'worktree' | 'in-place'; writerAccess: 'sandboxed' | 'sandboxed-network' | 'full'; check?: string; };
 }

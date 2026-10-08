@@ -30,6 +30,9 @@ import { Bus } from './bus.ts';
 import { CLAUDE_ACCESS, CODEX_ACCESS, ChatManager } from './chats.ts';
 import { gitState, listDirs } from './fsapi.ts';
 import { PermissionBroker } from './permissions.ts';
+import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from '../templates/catalog.ts';
+import { templateErrors } from '../templates/validate.ts';
+import { clearMemory } from '../templates/memory.ts';
 import { RunManager } from './runs.ts';
 
 function arg(name: string): string | undefined {
@@ -105,8 +108,8 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   const name = path.replace(/^\/+/, '');
   const file = path === '/' ? join(GUI_DIR, 'index.html')
     : /^(app|chunk-|[\w-]+-[A-Z0-9]{8})[\w.-]*\.(js|css|map|woff2)$/.test(name) ? join(GUI_DIST, name)
-    : path === '/icon.svg' ? join(PROJECT_ROOT, 'desktop', 'icon.svg')
-    : '';
+      : path === '/icon.svg' ? join(PROJECT_ROOT, 'desktop', 'icon.svg')
+        : '';
   if (!file || !existsSync(file) || !statSync(file).isFile()) return false;
   const text = /\.(html|js|css|map|svg)$/.test(file);
   res.writeHead(200, {
@@ -181,7 +184,7 @@ function state() {
   };
 }
 
-let claudeUpdate: Promise<{ ok: boolean; output: string }> | undefined;
+let claudeUpdate: Promise<{ ok: boolean; output: string; }> | undefined;
 
 type Handler = (m: RegExpMatchArray, req: IncomingMessage, url: URL, res: ServerResponse) => Promise<unknown> | unknown;
 const routes: [string, RegExp, Handler][] = [
@@ -238,6 +241,13 @@ const routes: [string, RegExp, Handler][] = [
     setTimeout(() => void shutdown(), 10);
     return { ok: true };
   }],
+  ['GET', /^\/api\/templates$/, () => listTemplates()],
+  ['POST', /^\/api\/templates$/, async (_m, req) => saveTemplate(await body(req))],
+  ['POST', /^\/api\/templates\/validate$/, async (_m, req) => ({ errors: templateErrors(await body(req)) })],
+  ['POST', /^\/api\/templates\/generate$/, async (_m, req) => runs.generate(await body(req))],
+  ['GET', /^\/api\/templates\/([\w-]+)$/, (m) => getTemplate(m[1])],
+  ['DELETE', /^\/api\/templates\/([\w-]+)$/, (m) => { deleteTemplate(m[1]); return { ok: true }; }],
+  ['DELETE', /^\/api\/templates\/([\w-]+)\/memory\/([\w-]+)$/, (m) => { clearMemory(getTemplate(m[1]), m[2]); return { ok: true }; }],
   ['GET', /^\/api\/runs$/, () => runs.list()],
   ['POST', /^\/api\/runs$/, async (_m, req) => runs.start(await body(req))],
   ['GET', /^\/api\/runs\/([\w.-]+)$/, (m) => runs.get(m[1])],
@@ -252,7 +262,9 @@ const routes: [string, RegExp, Handler][] = [
   }],
   ['POST', /^\/api\/runs\/([\w.-]+)\/continue$/, async (m, req) => {
     const b = await body(req);
-    return runs.continue(m[1], String(b.note ?? ''), Math.max(1, Math.min(20, Number(b.rounds ?? 1))), b.chair || undefined);
+    const rounds = Number(b.rounds ?? 1);
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > 20) throw new HttpError(400, 'rounds must be 1–20');
+    return runs.continue(m[1], String(b.note ?? ''), rounds, b.chair || undefined);
   }],
   ['GET', /^\/api\/runs\/([\w.-]+)\/export$/, (m, _r, url, res) => {
     const md = url.searchParams.get('format') === 'md';
@@ -277,9 +289,9 @@ const routes: [string, RegExp, Handler][] = [
 ];
 
 const server: Server = createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   try {
     if (!hostOk(req)) throw new HttpError(421, 'bad host');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (!url.pathname.startsWith('/api/')) {
       if (req.method === 'GET' && serveStatic(res, url.pathname)) return;
       throw new HttpError(404, 'not found');

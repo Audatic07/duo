@@ -1,5 +1,5 @@
 /** duo protocol runs (debate, review, council, ask, pair) started from the GUI, with live progress. */
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Config } from '../config.ts';
 import { SCRATCH_DIR } from '../paths.ts';
@@ -10,16 +10,22 @@ import { council } from '../protocols/council.ts';
 import { debate } from '../protocols/debate.ts';
 import { pair, pairSettingsOf, type PairSettings } from '../protocols/pair.ts';
 import { review, type ReviewTarget } from '../protocols/review.ts';
+import { getTemplate } from '../templates/catalog.ts';
+import { generateTemplate, type GenerateRequest } from '../templates/generate.ts';
+import { runTemplate } from '../templates/run.ts';
+import { validateTemplate } from '../templates/validate.ts';
+import type { CoordinationTemplate } from '../templates/types.ts';
 import { exportHtml } from '../render.ts';
 import { parseSeat, seatIds, type Seat } from '../seats.ts';
 import { deleteRun, listRuns, markInterrupted, RunStore, type RunMeta } from '../store.ts';
 import { finishWorkspace, workspaceDiff, workspaceOptions } from '../worktree.ts';
 import type { Bus } from './bus.ts';
 
-export type Protocol = 'debate' | 'review' | 'council' | 'ask' | 'pair';
+export type Protocol = 'debate' | 'review' | 'council' | 'ask' | 'pair' | 'custom';
 
 export interface StartRun {
   protocol: Protocol;
+  template?: CoordinationTemplate | string;
   seats: string[];
   chair?: string;
   rounds?: number;
@@ -30,7 +36,7 @@ export interface StartRun {
   noProject?: boolean;
   brief?: string;
   title?: string;
-  review?: ReviewTarget & { focus?: string };
+  review?: ReviewTarget & { focus?: string; };
   pair?: Partial<PairSettings>;
 }
 
@@ -43,7 +49,7 @@ function summary(m: RunMeta, running: boolean) {
     status: running ? 'running' : m.status,
     createdAt: m.createdAt,
     finishedAt: m.finishedAt,
-    seats: m.seats.filter((s) => s.role === 'participant' || s.role === 'writer').map((s) => s.spec),
+    seats: [...new Map(m.seats.filter((s) => s.customRole || (s.role !== 'chair' && s.role !== 'reviewer')).map((s) => [s.id, s.spec])).values()],
     outcome: m.outcome,
     totals: m.totals,
     continuedFrom: m.continuedFrom,
@@ -51,7 +57,7 @@ function summary(m: RunMeta, running: boolean) {
   };
 }
 
-const PROTOCOLS: Protocol[] = ['debate', 'review', 'council', 'ask', 'pair'];
+const PROTOCOLS: Protocol[] = ['debate', 'review', 'council', 'ask', 'pair', 'custom'];
 
 export class RunManager {
   private readonly active = new Map<string, RunContext>();
@@ -103,6 +109,9 @@ export class RunManager {
       findings: json('findings.json'),
       council: json('council.json'),
       pair: json('pair.json'),
+      coordination: json('coordination.json'),
+      template: json('template.json'),
+      draftTemplate: json('draft-template.json'),
       dir: store.dir,
     };
   }
@@ -134,59 +143,78 @@ export class RunManager {
     })();
   }
 
-  start(req: StartRun): { id: string } {
+  start(req: StartRun): { id: string; } {
     if (!PROTOCOLS.includes(req.protocol)) throw new Error(`unknown protocol ${req.protocol}`);
+    const template = req.protocol === 'custom' ? (typeof req.template === 'string' ? getTemplate(req.template) : validateTemplate(req.template)) : undefined;
+    const mode = template?.library ?? req.protocol;
+    if (!Array.isArray(req.seats) || req.seats.length > 32) throw new Error('choose up to 32 model seats');
     const workspace = !req.noProject;
-    if (!workspace && (req.protocol === 'review' || req.protocol === 'pair')) throw new Error(`${req.protocol} works on a project folder`);
+    if (!workspace && (mode === 'review' || mode === 'pair' || Object.values(template?.roles ?? {}).some((r) => r.access && r.access !== 'read'))) throw new Error(`${req.protocol} works on a project folder`);
     let cwd: string;
     if (workspace) {
       cwd = resolve(req.cwd);
-      if (!existsSync(cwd)) throw new Error(`folder does not exist: ${cwd}`);
+      if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`folder does not exist or is not a directory: ${cwd}`);
     } else {
       cwd = join(SCRATCH_DIR, new Date().toISOString().replace(/[:.]/g, '-'));
       mkdirSync(cwd, { recursive: true });
     }
     const ids = seatIds(req.seats.length);
     const seats: Seat[] = req.seats.map((s, i) => parseSeat(s, ids[i], this.cfg.defaults));
-    const min = req.protocol === 'review' || req.protocol === 'ask' ? 1 : 2;
+    const min = mode === 'review' || mode === 'ask' || mode === 'custom' ? template?.limits.minSeats ?? 1 : 2;
     if (seats.length < min) throw new Error(`${req.protocol} needs at least ${min} seat(s)`);
-    if (req.protocol === 'pair' && seats.length !== 2) throw new Error('pair takes exactly two seats: the writer and the reviewer');
-    const chair = req.chair && req.protocol !== 'pair' ? parseSeat(req.chair, 'Z', this.cfg.defaults) : undefined;
-    const brief = (req.brief ?? '').trim() || (req.protocol === 'review' ? `Review ${req.review?.kind ?? 'uncommitted'}` : '');
-    if (!brief) throw new Error(req.protocol === 'pair' ? 'describe the task first' : 'the brief is empty');
+    if (mode === 'pair' && seats.length !== 2) throw new Error('pair takes exactly two seats: the writer and the reviewer');
+    const chair = req.chair && mode !== 'pair' ? parseSeat(req.chair, 'Z', this.cfg.defaults) : undefined;
+    const brief = (req.brief ?? '').trim() || (mode === 'review' ? `Review ${req.review?.kind ?? 'uncommitted'}` : '');
+    if (!brief) throw new Error(mode === 'pair' ? 'describe the task first' : 'the brief is empty');
     let pairSettings: PairSettings | undefined;
-    if (req.protocol === 'pair') {
+    if (mode === 'pair') {
       pairSettings = pairSettingsOf({ pair: req.pair ?? {} });
       if (pairSettings.isolation === 'worktree' && !workspaceOptions(cwd).head) throw new Error(`${cwd} is not a git repository with at least one commit; choose "In place" or commit first`);
     }
+    for (const [name, value] of [['rounds', req.rounds], ['minRounds', req.minRounds]] as const) if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 1000)) throw new Error(`${name} must be 1–1000`);
+    if (mode === 'debate' && (req.minRounds ?? 1) > (req.rounds ?? 3)) throw new Error('Minimum rounds cannot exceed the maximum');
     const opts: RunOptions = {
-      protocol: req.protocol,
+      protocol: template?.library ?? req.protocol,
       title: (req.title || brief.split('\n').find((l) => l.trim()) || req.protocol).replace(/^#+\s*/, '').slice(0, 80),
       brief,
       cwd,
       seats,
       chair,
-      rounds: req.rounds ?? (req.protocol === 'debate' ? 3 : req.protocol === 'review' ? 2 : req.protocol === 'pair' ? 4 : 1),
+      rounds: req.rounds ?? (mode === 'debate' ? 3 : mode === 'review' ? 2 : mode === 'pair' ? 4 : 1),
       minRounds: req.minRounds ?? 1,
       anon: !!req.anon,
       quiet: true,
-      extra: { gui: true, ...(req.review ? { target: req.review } : {}), ...(pairSettings ? { pair: pairSettings } : {}) },
+      extra: { gui: true, ...(template ? { template } : {}), ...(req.review ? { target: req.review, focus: req.review.focus } : {}), ...(pairSettings ? { pair: pairSettings } : {}) },
       workspace,
       sink: this.sink,
     };
     const ctx = RunContext.create(this.cfg, opts);
     this.track(ctx, () => {
+      if (template) return runTemplate(ctx, template);
       if (req.protocol === 'debate') return debate(ctx);
       if (req.protocol === 'council') return council(ctx);
       if (req.protocol === 'ask') return ask(ctx);
-      if (req.protocol === 'pair') return pair(ctx, pairSettings!);
+      if (mode === 'pair') return pair(ctx, pairSettings!);
       return review(ctx, req.review ?? { kind: 'uncommitted' }, req.review?.focus || undefined);
     });
     return { id: ctx.store.meta.id };
   }
 
+  async generate(req: GenerateRequest) {
+    let id: string | undefined;
+    try {
+      return await generateTemplate(this.cfg, {
+        ...req, safe: false, sink: this.sink, onContext: (ctx) => {
+          id = ctx.store.meta.id; this.active.set(id, ctx); this.sink!({ kind: 'log', text: 'authoring template draft', run: id });
+        }
+      });
+    } finally {
+      if (id) { this.active.delete(id); this.bus.emit({ t: 'run_finished', run: summary(RunStore.open(id).meta, false) }); }
+    }
+  }
+
   /** Continue a finished run; resolves with the new run's id as soon as it exists. */
-  continue(id: string, note: string, rounds: number, chair?: string): Promise<{ id: string }> {
+  continue(id: string, note: string, rounds: number, chair?: string): Promise<{ id: string; }> {
     const chairSeat = chair ? parseSeat(chair, 'Z', this.cfg.defaults) : undefined;
     return new Promise((resolveId, reject) => {
       let nid: string | undefined;

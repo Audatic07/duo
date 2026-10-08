@@ -21,6 +21,11 @@ import { formatWindows, fmtAgo, snapshot } from './quota.ts';
 import { refreshQuota } from './quota-refresh.ts';
 import { exportHtml, traceTable } from './render.ts';
 import { formatSeat, parseSeat, seatIds, SeatError, type Seat } from './seats.ts';
+import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from './templates/catalog.ts';
+import { validateTemplate } from './templates/validate.ts';
+import { generateTemplate } from './templates/generate.ts';
+import { runTemplate } from './templates/run.ts';
+import { clearMemory } from './templates/memory.ts';
 import { deleteRun, listRuns, RunStore } from './store.ts';
 
 assertNotNested();
@@ -77,11 +82,12 @@ interface RunFlags {
   print?: boolean;
 }
 
-function seatsFrom(cfg: Config, flags: RunFlags, min: number): { seats: Seat[]; chair?: Seat; preset?: { rounds?: number } } {
+function seatsFrom(cfg: Config, flags: RunFlags, min: number): { seats: Seat[]; chair?: Seat; preset?: { rounds?: number; }; } {
   const presetName = flags.preset ?? (flags.seat?.length ? undefined : cfg.defaults.preset);
   const preset = presetName ? cfg.presets[presetName] : undefined;
   if (presetName && !preset) fail(`unknown preset "${presetName}" (have: ${Object.keys(cfg.presets).join(', ')})`);
   const specs = flags.seat?.length ? flags.seat : preset!.seats;
+  if (specs.length > 32) fail('at most 32 model seats are supported');
   if (specs.length < min) fail(`need at least ${min} seat(s); pass -s/--seat or a preset`);
   const ids = seatIds(specs.length);
   let seats: Seat[];
@@ -94,7 +100,11 @@ function seatsFrom(cfg: Config, flags: RunFlags, min: number): { seats: Seat[]; 
     if (e instanceof SeatError) fail(e.message, 2);
     throw e;
   }
-  if (flags.timeout) for (const s of seats) s.timeoutSec ??= Number(flags.timeout);
+  if (flags.timeout !== undefined) {
+    const timeout = Number(flags.timeout);
+    if (!Number.isFinite(timeout) || timeout <= 0) fail('--timeout must be a positive number of seconds', 2);
+    for (const s of seats) s.timeoutSec ??= timeout;
+  }
   warnAgainstCatalog(cfg, [...seats, ...(chair ? [chair] : [])]);
   return { seats, chair, preset };
 }
@@ -111,10 +121,13 @@ function warnAgainstCatalog(cfg: Config, seats: Seat[]): void {
   }
 }
 
-function runOptions(cfg: Config, protocol: string, brief: string, flags: RunFlags, min: number, defaults: { rounds: number }): RunOptions {
+function runOptions(cfg: Config, protocol: string, brief: string, flags: RunFlags, min: number, defaults: { rounds: number; }): RunOptions {
   const { seats, chair, preset } = seatsFrom(cfg, flags, min);
   const rounds = Number(flags.rounds ?? preset?.rounds ?? defaults.rounds);
-  if (!Number.isInteger(rounds) || rounds < 1) fail('--rounds must be a positive integer', 2);
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 1000) fail('--rounds must be 1–1000', 2);
+  const minRounds = Number(flags.minRounds ?? 1);
+  if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > 1000) fail('--min-rounds must be 1–1000', 2);
+  if (protocol === 'debate' && minRounds > rounds) fail('--min-rounds cannot exceed --rounds', 2);
   const workspace = flags.project !== false;
   const cwd = workspace ? resolve(flags.cwd ?? process.cwd()) : scratchFolder();
   return {
@@ -125,7 +138,7 @@ function runOptions(cfg: Config, protocol: string, brief: string, flags: RunFlag
     seats,
     chair,
     rounds,
-    minRounds: Number(flags.minRounds ?? 1),
+    minRounds,
     anon: !!flags.anon,
     quiet: !!flags.quiet,
     extra: { safe: SAFE },
@@ -160,7 +173,7 @@ function emit(ctx: RunContext, report: string, flags: RunFlags): void {
   process.stdout.write(`report: ${join(ctx.store.dir, 'report.md')}\nrun: ${m.id}\n`);
 }
 
-function addRunFlags(cmd: Command, o: { chair?: boolean } = {}): Command {
+function addRunFlags(cmd: Command, o: { chair?: boolean; } = {}): Command {
   cmd
     .option('-s, --seat <spec>', 'participant as engine[:model][@effort][+opt...] (repeatable, order = A, B, ...)', (v: string, p: string[] = []) => [...p, v])
     .option('-p, --preset <name>', 'named seat set from the config (default: defaults.preset)')
@@ -200,7 +213,7 @@ addRunFlags(program.command('review').argument('[focus...]').description('indepe
   .option('--commit <sha>', 'review one commit')
   .option('--files <paths...>', 'review whole files')
   .option('--plan <file>', 'review a plan or design document')
-  .action(async (words: string[], flags: RunFlags & { base?: string; commit?: string; files?: string[]; plan?: string }) => {
+  .action(async (words: string[], flags: RunFlags & { base?: string; commit?: string; files?: string[]; plan?: string; }) => {
     const cfg = loadConfig();
     const focus = words.join(' ').trim() || undefined;
     const target: ReviewTarget = flags.commit ? { kind: 'commit', value: flags.commit } : flags.base ? { kind: 'base', value: flags.base } : flags.files ? { kind: 'files', files: flags.files.map((f) => resolve(f)) } : flags.plan ? { kind: 'plan', value: resolve(flags.plan) } : { kind: 'uncommitted' };
@@ -238,7 +251,7 @@ addRunFlags(program.command('pair').argument('[task...]').description('one seat 
   .option('--in-place', 'let the writer edit the folder itself (default: a git worktree on a new branch)')
   .option('--network', 'Codex writer: allow network access inside the sandbox (package installs)')
   .option('--full-access', 'writer runs without a sandbox (Codex danger-full-access, Claude bypassPermissions)')
-  .action(async (words: string[], flags: RunFlags & { cycles: string; check?: string; inPlace?: boolean; network?: boolean; fullAccess?: boolean }) => {
+  .action(async (words: string[], flags: RunFlags & { cycles: string; check?: string; inPlace?: boolean; network?: boolean; fullAccess?: boolean; }) => {
     if (SAFE) fail('pair writes files; it is not available in duo-safe');
     const cfg = loadConfig();
     const brief = await briefFrom(words, flags.briefFile);
@@ -266,7 +279,7 @@ addRunFlags(program.command('pair').argument('[task...]').description('one seat 
 program.command('apply').argument('<run>').description("finish a pair run's worktree: apply its changes to your folder (default), keep the branch, or discard it")
   .option('--keep-branch', 'commit on the duo/ branch and remove the worktree folder')
   .option('--discard', 'remove the worktree and its branch')
-  .action((ref: string, o: { keepBranch?: boolean; discard?: boolean }) => {
+  .action((ref: string, o: { keepBranch?: boolean; discard?: boolean; }) => {
     if (SAFE) fail('apply is not available in duo-safe');
     const store = RunStore.open(ref);
     const ws = store.meta.workspace;
@@ -303,7 +316,49 @@ program.command('continue').argument('<run>').argument('[message...]').descripti
     }
   });
 
-program.command('runs').description('list runs').option('-n <n>', 'how many', '20').action((o: { n: string }) => {
+const templates = program.command('template').description('author, validate, save and run custom coordination methods');
+const templateFrom = (ref: string) => existsSync(ref) ? validateTemplate(JSON.parse(readFileSync(ref, 'utf8'))) : getTemplate(ref);
+templates.command('list').action(() => {
+  for (const { template: t, builtin } of listTemplates()) process.stdout.write(`${t.id}  ${t.name}${builtin ? ' (built-in)' : ''}\n`);
+});
+templates.command('show').argument('<id-or-file>').action((ref: string) => { process.stdout.write(JSON.stringify(templateFrom(ref), null, 2) + '\n'); });
+templates.command('validate').argument('<file>').action((ref: string) => { const t = templateFrom(ref); process.stdout.write(`${t.id}: valid\n`); });
+templates.command('save').argument('<file>').action((ref: string) => { const t = saveTemplate(templateFrom(ref)); process.stdout.write(`Saved ${t.id}\n`); });
+templates.command('delete').argument('<id>').action((id: string) => { deleteTemplate(id); process.stdout.write(`Deleted ${id}\n`); });
+templates.command('memory-clear').argument('<id>').argument('<channel>').action((id: string, channel: string) => { clearMemory(getTemplate(id), channel); process.stdout.write(`Cleared ${id}/${channel}\n`); });
+templates.command('generate').argument('[description...]')
+  .requiredOption('-s, --seat <spec>', 'the model and effort that author the method')
+  .option('--current <file>', 'revise this draft')
+  .option('-o, --output <file>', 'write the validated draft here')
+  .action(async (words: string[], o: { seat: string; current?: string; output?: string; }) => {
+    if (SAFE && o.output) fail('--output is not available in duo-safe; the validated draft is printed to stdout');
+    const result = await generateTemplate(loadConfig(), { description: await briefFrom(words), model: o.seat, current: o.current ? templateFrom(o.current) : undefined, safe: SAFE, onContext: cancelOnInterrupt });
+    const text = JSON.stringify(result.template, null, 2) + '\n';
+    if (o.output) { writeFileSync(resolve(o.output), text); process.stdout.write(`Draft: ${resolve(o.output)}\n${result.explanation}\n`); }
+    else process.stdout.write(text);
+  });
+addRunFlags(templates.command('run').argument('<id-or-file>').argument('[brief...]').description('run a saved template or JSON file'))
+  .option('--check <command>', 'pair library: check after each writer turn')
+  .option('--in-place', 'write in the project with a snapshot instead of a worktree')
+  .option('--base <branch>', 'review library: base branch')
+  .action(async (ref: string, words: string[], flags: RunFlags & { check?: string; inPlace?: boolean; base?: string; }) => {
+    const cfg = loadConfig();
+    const t = templateFrom(ref);
+    if (SAFE && (t.library === 'pair' || Object.values(t.roles).some((r) => r.access && r.access !== 'read'))) fail('write templates are not available in duo-safe');
+    const brief = await briefFrom(words, flags.briefFile);
+    if (!brief) fail('no brief', 2);
+    const protocol = t.library ?? 'custom';
+    const min = t.library === 'pair' || t.library === 'council' || t.library === 'debate' ? 2 : t.limits.minSeats ?? 1;
+    const opts = runOptions(cfg, protocol, brief, flags, min, { rounds: t.library === 'pair' ? 4 : t.library === 'debate' ? 3 : t.library === 'review' ? 2 : 1 });
+    if (opts.workspace === false && (t.library === 'pair' || t.library === 'review')) fail(`${t.library} needs a project folder`);
+    opts.extra.template = t;
+    if (t.library === 'pair') opts.extra.pair = { isolation: flags.inPlace ? 'in-place' : 'worktree', writerAccess: 'sandboxed', check: flags.check };
+    if (t.library === 'review') opts.extra.target = flags.base ? { kind: 'base', value: flags.base } : { kind: 'uncommitted' };
+    const ctx = RunContext.create(cfg, opts); cancelOnInterrupt(ctx);
+    emit(ctx, await runTemplate(ctx, t), flags);
+  });
+
+program.command('runs').description('list runs').option('-n <n>', 'how many', '20').action((o: { n: string; }) => {
   const rows = listRuns(Number(o.n));
   if (!rows.length) return void process.stdout.write('no runs yet\n');
   for (const m of rows) {
@@ -317,7 +372,7 @@ program.command('show').argument('[run]', 'run id, unique fragment, or latest', 
   .option('--report', 'print report.md')
   .option('--turn <n>', 'print one turn')
   .addOption(new Option('--part <part>', 'with --turn: which file').choices(['reply', 'prompt', 'thinking', 'tools', 'meta', 'raw', 'json']).default('reply'))
-  .action((ref: string, o: { report?: boolean; turn?: string; part: string }) => {
+  .action((ref: string, o: { report?: boolean; turn?: string; part: string; }) => {
     const store = RunStore.open(ref);
     if (o.turn) {
       const t = store.meta.turns.find((x) => x.n === Number(o.turn));
@@ -346,7 +401,7 @@ program.command('trace').argument('[run]', 'run id or latest', 'latest').descrip
 program.command('export').argument('[run]', 'run id or latest', 'latest').description('export a run as a single HTML page, JSON, or Markdown')
   .addOption(new Option('--format <fmt>').choices(['html', 'json', 'md']).default('html'))
   .option('-o, --out <file>', 'output path (default: inside the run directory)')
-  .action((ref: string, o: { format: string; out?: string }) => {
+  .action((ref: string, o: { format: string; out?: string; }) => {
     const store = RunStore.open(ref);
     const m = store.meta;
     const report = store.readFile('report.md') ?? '';
@@ -373,7 +428,7 @@ program.command('rm').argument('<run>').description('delete a run directory').ac
 
 program.command('quota').description('Codex and Claude subscription usage (free: read from local snapshots)')
   .option('--refresh', 'ping the cheapest model on each side first for a fresh snapshot')
-  .action((o: { refresh?: boolean }) => {
+  .action((o: { refresh?: boolean; }) => {
     const cfg = loadConfig();
     if (o.refresh) refreshQuota(cfg);
     const q = snapshot();
@@ -386,7 +441,7 @@ program.command('quota').description('Codex and Claude subscription usage (free:
 
 program.command('models').description("models you can seat: Codex's live catalog for this client, Claude aliases")
   .option('--refresh', 'refetch the Codex catalog')
-  .action((o: { refresh?: boolean }) => {
+  .action((o: { refresh?: boolean; }) => {
     const cfg = loadConfig();
     const bin = resolveCodexBin(cfg);
     const rates = knownCodexRates();
@@ -418,7 +473,7 @@ program.command('doctor').description('check both CLIs, their logins and version
 program.command('setup').description('install (or --uninstall) the duo/duo-safe commands, the Claude and Codex skills, the Codex allow-rule for duo-safe, and the Duo app launcher')
   .option('--uninstall', 'remove what setup installs')
   .option('--no-launcher', 'skip the app launcher (menu entry, Applications folder, Start menu)')
-  .action((o: { uninstall?: boolean; launcher?: boolean }) => {
+  .action((o: { uninstall?: boolean; launcher?: boolean; }) => {
     if (SAFE) fail('setup is not available in duo-safe');
     const log = (line: string) => process.stdout.write(`${line}\n`);
     try {
@@ -441,7 +496,7 @@ program.command('gui').description('open the Duo desktop app').action(() => {
 
 program.command('config').description('print the effective config, or write a starter file')
   .option('--init', `write the defaults to ${CONFIG_PATH} if it does not exist`)
-  .action((o: { init?: boolean }) => {
+  .action((o: { init?: boolean; }) => {
     if (o.init) {
       if (existsSync(CONFIG_PATH)) fail(`${CONFIG_PATH} already exists`);
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });

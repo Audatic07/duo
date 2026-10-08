@@ -3,17 +3,17 @@ import { api, desktop, subscribe } from './api.ts';
 import type { AppState, Block, ChatSession, ChatSummary, ChatTurn, DoctorCheck, Engine, LiveTurn, Prefs, Protocol, RunDetails, RunSummary, StartRun } from './types.ts';
 
 export type View =
-  | { kind: 'home' }
-  | { kind: 'chat'; panes: string[] }
-  | { kind: 'run'; id: string }
-  | { kind: 'new-run'; draft?: Partial<StartRun> };
+  | { kind: 'home'; }
+  | { kind: 'chat'; panes: string[]; }
+  | { kind: 'run'; id: string; }
+  | { kind: 'new-run'; draft?: Partial<StartRun>; };
 
 export type Modal =
   | null
-  | { kind: 'folder'; onPick: (p: string) => void; start?: string }
-  | { kind: 'settings'; tab?: 'general' | 'presets' | 'setup' | 'about' }
-  | { kind: 'shortcuts' }
-  | { kind: 'confirm'; title: string; body: string; action: string; danger?: boolean; onConfirm: () => void };
+  | { kind: 'folder'; onPick: (p: string) => void; start?: string; }
+  | { kind: 'settings'; tab?: 'general' | 'presets' | 'setup' | 'about'; }
+  | { kind: 'shortcuts'; }
+  | { kind: 'confirm'; title: string; body: string; action: string; danger?: boolean; onConfirm: () => void; };
 
 export const app = signal<AppState | null>(null);
 export const connected = signal(false);
@@ -25,7 +25,7 @@ export const runLive = signal<Record<string, Record<number, LiveTurn>>>({});
 export const view = signal<View>(loadView());
 export const modal = signal<Modal>(null);
 export const paletteOpen = signal(false);
-export const toasts = signal<{ id: number; text: string; kind: 'error' | 'info' | 'success'; action?: { label: string; run: () => void } }[]>([]);
+export const toasts = signal<{ id: number; text: string; kind: 'error' | 'info' | 'success'; action?: { label: string; run: () => void; }; }[]>([]);
 export const gitTick = signal(0);
 export const doctor = signal<DoctorCheck[] | null>(null);
 
@@ -85,7 +85,7 @@ export function go(v: View): void {
 // ── toasts ───────────────────────────────────────────────────────────────
 
 let toastId = 0;
-export function toast(text: string, kind: 'error' | 'info' | 'success' = 'error', action?: { label: string; run: () => void }): void {
+export function toast(text: string, kind: 'error' | 'info' | 'success' = 'error', action?: { label: string; run: () => void; }): void {
   const id = ++toastId;
   toasts.value = [...toasts.value, { id, text, kind, action }];
   setTimeout(() => (toasts.value = toasts.value.filter((t) => t.id !== id)), kind === 'error' ? 9000 : action ? 7000 : 3500);
@@ -104,7 +104,7 @@ export async function guard<T>(p: Promise<T>): Promise<T | undefined> {
   }
 }
 
-export function confirmAction(o: { title: string; body: string; action: string; danger?: boolean }, onConfirm: () => void): void {
+export function confirmAction(o: { title: string; body: string; action: string; danger?: boolean; }, onConfirm: () => void): void {
   modal.value = { kind: 'confirm', ...o, onConfirm };
 }
 
@@ -179,7 +179,7 @@ function refetchRunSoon(id: string): void {
 
 // ── chats ────────────────────────────────────────────────────────────────
 
-export async function newChat(engine: Engine, o: { spec?: string; access?: string; cwd?: string } = {}): Promise<ChatSession | undefined> {
+export async function newChat(engine: Engine, o: { spec?: string; access?: string; cwd?: string; } = {}): Promise<ChatSession | undefined> {
   const cwd = o.cwd ?? project.value;
   const c = await guard(api<ChatSession>('/api/chats', { method: 'POST', body: { engine, cwd: cwd || undefined, noProject: !cwd, spec: o.spec, access: o.access } }));
   if (!c) return undefined;
@@ -240,7 +240,7 @@ export function decide(requestId: string, decision: 'allow' | 'allow_session' | 
 // ── runs ─────────────────────────────────────────────────────────────────
 
 export async function startRun(req: StartRun): Promise<void> {
-  const r = await guard(api<{ id: string }>('/api/runs', { method: 'POST', body: req }));
+  const r = await guard(api<{ id: string; }>('/api/runs', { method: 'POST', body: req }));
   if (!r) return;
   setPrefs({ lastSeats: { ...(prefs.value.lastSeats ?? {}), [req.protocol]: { seats: req.seats, chair: req.chair } } });
   go({ kind: 'run', id: r.id });
@@ -256,12 +256,12 @@ export async function deleteRun(id: string): Promise<void> {
 }
 
 export async function continueRun(id: string, note: string, rounds: number): Promise<void> {
-  const r = await guard(api<{ id: string }>(`/api/runs/${encodeURIComponent(id)}/continue`, { method: 'POST', body: { note, rounds } }));
+  const r = await guard(api<{ id: string; }>(`/api/runs/${encodeURIComponent(id)}/continue`, { method: 'POST', body: { note, rounds } }));
   if (r) go({ kind: 'run', id: r.id });
 }
 
 export async function workspaceAction(id: string, action: 'apply' | 'keep' | 'discard'): Promise<void> {
-  const r = await guard(api<{ message: string }>(`/api/runs/${encodeURIComponent(id)}/workspace`, { method: 'POST', body: { action } }));
+  const r = await guard(api<{ message: string; }>(`/api/runs/${encodeURIComponent(id)}/workspace`, { method: 'POST', body: { action } }));
   if (r) {
     toast(r.message, 'success');
     gitTick.value++;
@@ -290,7 +290,7 @@ export async function loadDoctor(live = false): Promise<void> {
 
 export async function updateClaude(): Promise<void> {
   toast('Updating Claude Code…', 'info');
-  const r = await guard(api<{ ok: boolean; output: string; version: string }>('/api/maintenance/update-claude', { method: 'POST' }));
+  const r = await guard(api<{ ok: boolean; output: string; version: string; }>('/api/maintenance/update-claude', { method: 'POST' }));
   if (!r) return;
   toast(r.ok ? `Claude Code is ${r.version}` : `Update failed: ${r.output.slice(-300)}`, r.ok ? 'success' : 'error');
   void loadDoctor();
@@ -299,7 +299,7 @@ export async function updateClaude(): Promise<void> {
 
 // ── live events ──────────────────────────────────────────────────────────
 
-function upsertSummary<T extends { id: string }>(list: T[], item: T, sortKey: keyof T): T[] {
+function upsertSummary<T extends { id: string; }>(list: T[], item: T, sortKey: keyof T): T[] {
   const rest = list.filter((x) => x.id !== item.id);
   return [item, ...rest].sort((a, b) => String(b[sortKey]).localeCompare(String(a[sortKey])));
 }
@@ -328,7 +328,7 @@ function liveTurn(run: string, n: number, fn: (t: LiveTurn | undefined) => LiveT
   runLive.value = { ...runLive.value, [run]: { ...all, [n]: next } };
 }
 
-const PROTOCOL_NAMES: Record<Protocol, string> = { debate: 'Debate', review: 'Review', council: 'Council', ask: 'Ask', pair: 'Pair' };
+const PROTOCOL_NAMES: Record<Protocol, string> = { debate: 'Debate', review: 'Review', council: 'Council', ask: 'Ask', pair: 'Pair', custom: 'Custom' };
 
 function onEvent(e: any): void {
   const s = app.value;

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for Claude Code's `-p --input-format stream-json --output-format stream-json` in tests.
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { instance, record, valueOf } from './common.mjs';
 
@@ -39,7 +40,11 @@ for await (const line of createInterface({ input: process.stdin })) {
   out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
   out({ type: 'assistant', message: { id: `m${turns}`, content: [{ type: 'text', text }] }, session_id: sid });
   cost += 0.01;
-  const structured = schema ? instance(JSON.parse(schema), { answer: text }) : undefined;
+  const outputSchema = schema ? JSON.parse(schema) : undefined;
+  const structured = outputSchema?.properties?.templateJson && process.env.FAKE_TEMPLATE_FILE ? {
+    templateJson: process.env.FAKE_TEMPLATE_INVALID_FIRST && !/draft failed validation/i.test(prompt) ? '{}' : readFileSync(process.env.FAKE_TEMPLATE_FILE, 'utf8'),
+    explanation: 'A validated fake draft',
+  } : schema ? instance(outputSchema, { answer: text }) : undefined;
   out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
   out({ type: 'result', subtype: 'success', is_error: false, result: structured ? JSON.stringify(structured) : text, structured_output: structured, session_id: sid, user_message_uuids: [msg.uuid], usage: { input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 0, output_tokens: 20 }, total_cost_usd: cost });
   // Simulate a CLI that goes away between turns (crash, update, laptop sleep).

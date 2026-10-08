@@ -1,31 +1,38 @@
-import { useEffect, useState } from 'preact/hooks';
+import { seatId } from '../../src/seat-ids.ts';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, desktop, exportUrl, MOD } from './api.ts';
 import { BlockView, Markdown } from './Chat.tsx';
 import { MODES, ModeDemo, type ModeId } from './demos.tsx';
 import { DiffView } from './Diff.tsx';
 import { onCopyClick } from './md.ts';
+import { TemplateEditor } from './Templates.tsx';
+import type { CoordinationTemplate } from '../../src/templates/types.ts';
+import { templateOperationSettings } from '../../src/templates/operations.ts';
 import { SeatPicker } from './SeatPicker.tsx';
 import { parseSpec, shortSpec } from './spec.ts';
 import { app, cancelRun, confirmAction, continueRun, deleteRun, go, guard, loadRun, prefs, project, runLive, runLogs, runs, startRun, toast, updateClaude, workspaceAction } from './store.ts';
 import type { LiveTurn, PairCycle, Protocol, RunDetails, RunTurnMeta, StartRun } from './types.ts';
-import { base, Dropdown, dur, Elapsed, Empty, EngineMark, Icon, Kbd, kfmt, MenuItem, MenuSeparator, Modal, money, Segmented, Spinner, Tabs, Toggle, untilText } from './ui.tsx';
+import { base, Dropdown, dur, Elapsed, Empty, EngineMark, Icon, IntegerInput, Kbd, kfmt, MenuItem, MenuSeparator, Modal, money, Segmented, Spinner, Tabs, Toggle, untilText } from './ui.tsx';
 
-export const PROTOCOLS: Record<Protocol, { icon: string; label: string; help: string; mode: ModeId }> = {
+export const PROTOCOLS: Record<Protocol, { icon: string; label: string; help: string; mode: ModeId; }> = {
   pair: { icon: 'pair', label: 'Pair', help: MODES.pair.tagline, mode: 'pair' },
   debate: { icon: 'debate', label: 'Debate', help: MODES.debate.tagline, mode: 'debate' },
   review: { icon: 'review', label: 'Review', help: MODES.review.tagline, mode: 'review' },
   council: { icon: 'council', label: 'Council', help: MODES.council.tagline, mode: 'council' },
   ask: { icon: 'ask', label: 'Ask', help: MODES.ask.tagline, mode: 'ask' },
+  custom: { icon: 'branch', label: 'Custom', help: 'Build your own model interaction with roles, workflow steps, rules and persistent memory. Use the visual builder or describe your method to a model.', mode: 'ask' },
 };
-export const PROTOCOL_ORDER: Protocol[] = ['pair', 'debate', 'review', 'council', 'ask'];
+export const PROTOCOL_ORDER: Protocol[] = ['pair', 'debate', 'review', 'council', 'ask', 'custom'];
 
 type Tone = 'good' | 'warn' | 'bad' | 'running' | 'neutral';
 
-export function outcomeTone(status: string, outcome?: Record<string, any>): { tone: Tone; label: string } {
+export function outcomeTone(status: string, outcome?: Record<string, any>): { tone: Tone; label: string; } {
   const stop = String(outcome?.stop ?? '');
   if (status === 'running') return { tone: 'running', label: 'running' };
   if (status === 'cancelled' || stop.startsWith('cancelled')) return { tone: 'neutral', label: 'cancelled' };
   if (status === 'failed') return { tone: 'bad', label: 'failed' };
+  if (outcome?.completion === 'blocked') return { tone: 'warn', label: 'blocked' };
+  if (outcome?.completion === 'limit') return { tone: 'warn', label: 'limit reached' };
   if (stop.startsWith('converged')) return { tone: 'good', label: 'converged' };
   if (stop.startsWith('NOT converged')) return { tone: 'warn', label: 'not converged' };
   if (stop.startsWith('stalled')) return { tone: 'warn', label: 'stalled' };
@@ -35,7 +42,7 @@ export function outcomeTone(status: string, outcome?: Record<string, any>): { to
   return { tone: 'good', label: status === 'completed' ? 'done' : status };
 }
 
-export function StatusChip({ status, outcome }: { status: string; outcome?: Record<string, any> }) {
+export function StatusChip({ status, outcome }: { status: string; outcome?: Record<string, any>; }) {
   const t = outcomeTone(status, outcome);
   return <span class={`status ${t.tone}`}>{t.tone === 'running' ? <span class="pulse-dot" /> : null}{t.label}</span>;
 }
@@ -45,14 +52,14 @@ function seatRole(d: RunDetails, seat: string): string {
   return seat === d.pair?.writer || d.meta.seats.find((s) => s.id === seat)?.role === 'writer' ? 'Writer' : 'Reviewer';
 }
 
-function SeatChips({ d }: { d: RunDetails }) {
-  const seats = d.meta.seats.filter((s) => s.role !== 'reviewer');
+function SeatChips({ d }: { d: RunDetails; }) {
+  const seats = [...new Map(d.meta.seats.filter((s) => d.meta.protocol === 'custom' || s.role !== 'reviewer').map((s) => [s.id, s])).values()];
   return (
     <div class="seat-chips">
       {seats.map((s) => (
         <span class={`chip static ${s.engine}`} title={s.spec}>
           <EngineMark engine={s.engine} size={16} />
-          <b>{s.role === 'chair' ? 'Chair' : d.meta.protocol === 'pair' ? (s.role === 'writer' ? 'Writer' : 'Reviewer') : s.id}</b>
+          <b>{d.meta.protocol === 'custom' ? `${s.id} · ${Object.keys(d.coordination?.roles ?? {}).find((r) => d.coordination!.roles[r].includes(s.id)) ?? s.role}` : s.role === 'chair' ? 'Chair' : d.meta.protocol === 'pair' ? (s.role === 'writer' ? 'Writer' : 'Reviewer') : s.id}</b>
           <span class="muted">{shortSpec(s.spec)}</span>
         </span>
       ))}
@@ -62,8 +69,8 @@ function SeatChips({ d }: { d: RunDetails }) {
 
 // ── live activity ────────────────────────────────────────────────────────
 
-function LiveCard({ t, d }: { t: LiveTurn; d: RunDetails }) {
-  const seat = d.meta.seats.find((s) => (t.seat === 'chair' ? s.role === 'chair' : s.id === t.seat && s.role !== 'reviewer'));
+function LiveCard({ t, d }: { t: LiveTurn; d: RunDetails; }) {
+  const seat = d.meta.seats.find((s) => (t.seat === 'chair' ? s.role === 'chair' : s.id === t.seat && (s.customRole || s.role !== 'reviewer')));
   const [all, setAll] = useState(false);
   const blocks = all ? t.blocks : t.blocks.slice(-6);
   return (
@@ -85,7 +92,7 @@ function LiveCard({ t, d }: { t: LiveTurn; d: RunDetails }) {
   );
 }
 
-function LiveActivity({ d }: { d: RunDetails }) {
+function LiveActivity({ d }: { d: RunDetails; }) {
   const live = Object.values(runLive.value[d.meta.id] ?? {});
   const running = live.filter((t) => !t.done);
   if (!running.length) return null;
@@ -101,7 +108,7 @@ function LiveActivity({ d }: { d: RunDetails }) {
 
 // ── rounds grid (debate, review, council, ask) ───────────────────────────
 
-function TurnCard({ t, onOpen }: { t: RunTurnMeta; onOpen: () => void }) {
+function TurnCard({ t, onOpen }: { t: RunTurnMeta; onOpen: () => void; }) {
   return (
     <button type="button" class={`turn-card ${t.error ? 'err' : ''}`} onClick={onOpen} title={t.error ?? (t.warnings?.join('\n') || 'Open the prompt, reply, tool calls and reasoning')}>
       <div class="tc-top"><span class="tc-kind">{t.kind}</span><span class="muted small">{dur(t.durationMs)}</span></div>
@@ -114,13 +121,13 @@ function TurnCard({ t, onOpen }: { t: RunTurnMeta; onOpen: () => void }) {
   );
 }
 
-function RoundsGrid({ d, onOpen }: { d: RunDetails; onOpen: (n: number) => void }) {
+function RoundsGrid({ d, onOpen }: { d: RunDetails; onOpen: (n: number) => void; }) {
   const m = d.meta;
-  const cols = [...new Set(m.turns.map((t) => t.seat))].sort((a, b) => (a === 'chair' ? 1 : b === 'chair' ? -1 : a.localeCompare(b)));
+  const cols = [...new Set(m.turns.map((t) => t.seat))].sort((a, b) => (a === 'chair' ? 1 : b === 'chair' ? -1 : a.length - b.length || a.localeCompare(b)));
   // Older runs recorded the chair as round 0; it still belongs at the end.
   const rounds = [...new Set(m.turns.map((t) => t.round))].sort((a, b) => (a === 0 ? 1 : b === 0 ? -1 : a - b));
   const stats: any[] = d.ledger?.rounds ?? [];
-  const specOf = (seat: string) => m.seats.find((s) => (s.role === 'chair' ? 'chair' : s.id) === seat && s.role !== 'reviewer') ?? m.seats.find((s) => s.id === seat);
+  const specOf = (seat: string) => m.seats.find((s) => (s.role === 'chair' && !s.customRole ? 'chair' : s.id) === seat && (s.customRole || s.role !== 'reviewer')) ?? m.seats.find((s) => s.id === seat);
   if (!m.turns.length) return <Empty icon="clock" title="Waiting for the first replies">The first round runs in parallel; replies appear here as they land.</Empty>;
   return (
     <div class="grid-wrap">
@@ -137,13 +144,15 @@ function RoundsGrid({ d, onOpen }: { d: RunDetails; onOpen: (n: number) => void 
         </thead>
         <tbody>
           {rounds.map((r) => {
-            const st = stats.find((x) => x.round === r);
-            const chairOnly = m.turns.filter((t) => t.round === r).every((t) => t.seat === 'chair');
+            const st = d.ledger?.resolution?.round === r ? d.ledger.resolution : stats.find((x) => x.round === r);
+            const turns = m.turns.filter((t) => t.round === r);
+            const chairOnly = turns.every((t) => t.seat === 'chair');
+            const ledgerReview = turns.every((t) => t.kind.startsWith('ledger-review'));
             return (
               <tr>
-                <th class="round-label">{chairOnly ? 'Chair' : m.protocol === 'council' ? (r === 1 ? 'Answers' : r === 2 ? 'Ranking' : `Stage ${r}`) : `R${r}`}</th>
+                <th class="round-label">{chairOnly ? 'Chair' : ledgerReview ? 'Ledger review' : m.protocol === 'council' ? (r === 1 ? 'Answers' : r === 2 ? 'Ranking' : `Stage ${r}`) : `R${r}`}</th>
                 {cols.map((c) => (
-                  <td>{m.turns.filter((t) => t.round === r && t.seat === c).map((t) => <TurnCard t={t} onOpen={() => onOpen(t.n)} />)}</td>
+                  <td>{turns.filter((t) => t.seat === c).map((t) => <TurnCard t={t} onOpen={() => onOpen(t.n)} />)}</td>
                 ))}
                 {stats.length > 0 && (
                   <td class="ledger-cell">
@@ -169,7 +178,7 @@ function RoundsGrid({ d, onOpen }: { d: RunDetails; onOpen: (n: number) => void 
 
 // ── pair ─────────────────────────────────────────────────────────────────
 
-function CycleCard({ c, d, onOpen, running }: { c: PairCycle; d: RunDetails; onOpen: (n: number) => void; running: boolean }) {
+function CycleCard({ c, d, onOpen, running }: { c: PairCycle; d: RunDetails; onOpen: (n: number) => void; running: boolean; }) {
   const writer = d.meta.seats.find((s) => s.role === 'writer');
   const reviewer = d.meta.seats.find((s) => s.role === 'participant');
   const check = c.check;
@@ -205,13 +214,13 @@ function CycleCard({ c, d, onOpen, running }: { c: PairCycle; d: RunDetails; onO
   );
 }
 
-function PairTimeline({ d, onOpen, running }: { d: RunDetails; onOpen: (n: number) => void; running: boolean }) {
+function PairTimeline({ d, onOpen, running }: { d: RunDetails; onOpen: (n: number) => void; running: boolean; }) {
   const cycles = d.pair?.cycles ?? [];
   if (!cycles.length) return running ? <Empty icon="pair" title="Setting up the workspace">The writer starts as soon as its worktree is ready.</Empty> : <Empty icon="pair" title="No cycles ran" />;
   return <div class="cycles">{cycles.map((c) => <CycleCard c={c} d={d} onOpen={onOpen} running={running} />)}</div>;
 }
 
-function PairFindings({ d }: { d: RunDetails }) {
+function PairFindings({ d }: { d: RunDetails; }) {
   const fs = d.pair?.findings ?? [];
   if (!fs.length) return <Empty icon="check-circle" title="No findings">The reviewer has not filed any findings.</Empty>;
   const sorted = [...fs].sort((a, b) => (a.status === b.status ? a.severity.localeCompare(b.severity) : a.status === 'open' ? -1 : 1));
@@ -236,7 +245,7 @@ function PairFindings({ d }: { d: RunDetails }) {
   );
 }
 
-function WorkspaceBar({ d, running }: { d: RunDetails; running: boolean }) {
+function WorkspaceBar({ d, running }: { d: RunDetails; running: boolean; }) {
   const ws = d.meta.workspace;
   if (!ws) return null;
   if (ws.state === 'moved') {
@@ -266,8 +275,8 @@ function WorkspaceBar({ d, running }: { d: RunDetails; running: boolean }) {
   );
 }
 
-function RunChanges({ d }: { d: RunDetails }) {
-  const [diff, setDiff] = useState<{ diff: string; stat: string; files: { status: string; path: string }[]; state?: string } | null>(null);
+function RunChanges({ d }: { d: RunDetails; }) {
+  const [diff, setDiff] = useState<{ diff: string; stat: string; files: { status: string; path: string; }[]; state?: string; } | null>(null);
   const turns = d.meta.turns.length;
   useEffect(() => void guard(api<any>(`/api/runs/${encodeURIComponent(d.meta.id)}/diff`)).then((r) => r && setDiff(r)), [d.meta.id, turns, d.meta.workspace?.state]);
   if (!diff) return <div class="center pad"><Spinner /></div>;
@@ -282,7 +291,7 @@ function RunChanges({ d }: { d: RunDetails }) {
 
 // ── ledger / findings / ranking ──────────────────────────────────────────
 
-function Ledger({ d }: { d: RunDetails }) {
+function Ledger({ d }: { d: RunDetails; }) {
   const [filter, setFilter] = useState<'all' | 'open'>('all');
   const claims: any[] = d.ledger?.claims ?? [];
   const shown = claims.filter((c) => c.status !== 'withdrawn' && (filter === 'all' || c.status !== 'agreed'));
@@ -310,7 +319,7 @@ function Ledger({ d }: { d: RunDetails }) {
   );
 }
 
-function Findings({ d }: { d: RunDetails }) {
+function Findings({ d }: { d: RunDetails; }) {
   const f: any[] = d.findings ?? [];
   const sev: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
   if (!f.length) return <Empty icon="review" title="No findings yet" />;
@@ -334,7 +343,7 @@ function Findings({ d }: { d: RunDetails }) {
   );
 }
 
-function Ranking({ d }: { d: RunDetails }) {
+function Ranking({ d }: { d: RunDetails; }) {
   const rows: any[] = d.council?.table ?? [];
   if (!rows.length) return <Empty icon="council" title="Rankings appear after stage 2" />;
   return (
@@ -361,7 +370,7 @@ function Ranking({ d }: { d: RunDetails }) {
 
 // ── modals ───────────────────────────────────────────────────────────────
 
-function TurnModal({ runId, n, onClose }: { runId: string; n: number; onClose: () => void }) {
+function TurnModal({ runId, n, onClose }: { runId: string; n: number; onClose: () => void; }) {
   const [t, setT] = useState<any>(null);
   const [tab, setTab] = useState<'reply' | 'prompt' | 'tools' | 'thinking'>('reply');
   useEffect(() => void guard(api(`/api/runs/${encodeURIComponent(runId)}/turns/${n}`)).then(setT), [runId, n]);
@@ -402,7 +411,7 @@ function TurnModal({ runId, n, onClose }: { runId: string; n: number; onClose: (
   );
 }
 
-function ContinueModal({ d, onClose }: { d: RunDetails; onClose: () => void }) {
+function ContinueModal({ d, onClose }: { d: RunDetails; onClose: () => void; }) {
   const [note, setNote] = useState('');
   const [rounds, setRounds] = useState(d.meta.protocol === 'pair' ? 2 : 1);
   const unit = d.meta.protocol === 'pair' ? 'Cycles' : 'Rounds';
@@ -413,29 +422,32 @@ function ContinueModal({ d, onClose }: { d: RunDetails; onClose: () => void }) {
     </>}>
       <p class="muted small">Resumes the same Codex threads and Claude sessions (their context and prompt cache carry over) and runs more {unit.toLowerCase()} as a new run{d.meta.protocol === 'pair' ? ' on the same workspace' : ''}.</p>
       <label class="field">Note to the {d.meta.protocol === 'pair' ? 'writer' : 'participants'} (optional)<textarea rows={4} value={note} onInput={(e) => setNote((e.target as HTMLTextAreaElement).value)} placeholder={d.meta.protocol === 'pair' ? 'e.g. Keep the public API unchanged; add a test for the empty input case.' : 'e.g. You contradict each other on X; resolve it explicitly.'} /></label>
-      <label class="field inline">{unit} <input type="number" min={1} max={12} value={rounds} onInput={(e) => setRounds(Number((e.target as HTMLInputElement).value) || 1)} /></label>
+      <label class="field inline">{unit} <IntegerInput value={rounds} onChange={setRounds} /></label>
     </Modal>
   );
 }
 
 // ── run view ─────────────────────────────────────────────────────────────
 
-function Progress({ d, running }: { d: RunDetails; running: boolean }) {
+function Progress({ d, running }: { d: RunDetails; running: boolean; }) {
   const m = d.meta;
   if (m.protocol !== 'debate' && m.protocol !== 'pair') return null;
-  const start = m.continuedFrom ? Math.min(...m.turns.map((t) => t.round).filter((r) => r > 0), Infinity) : 1;
-  const max = Number(m.options.rounds ?? 3);
-  const done = new Set(m.turns.filter((t) => t.seat !== 'chair').map((t) => t.round)).size;
+  const turns = m.turns.filter((t) => m.protocol === 'debate' ? /^(position|critique)(-retry)?$/.test(t.kind) : t.seat !== 'chair');
+  const start = m.continuedFrom ? Math.min(...turns.map((t) => t.round).filter((r) => r > 0), Infinity) : 1;
+  const settings = templateOperationSettings(d.template, m.protocol === 'pair' ? 'pair.cycle' : 'debate.round');
+  const max = Number(settings.rounds) || Number(m.options.rounds ?? 3);
+  const done = new Set(turns.map((t) => t.round)).size;
+  const reviewing = running && m.turns.some((t) => t.kind.startsWith('ledger-review'));
   const pct = Math.min(100, (done / Math.max(1, max)) * 100);
   return (
     <div class="progress" title={`${m.protocol === 'pair' ? 'cycle' : 'round'} ${done} of at most ${max}`}>
-      <span class="progress-label">{m.protocol === 'pair' ? 'Cycle' : 'Round'} {(Number.isFinite(start) && start > 1 ? start - 1 : 0) + Math.min(max, running ? done + (m.turns.some((t) => t.round > 0) || done === 0 ? 1 : 0) : done)}<span class="muted"> / {Number.isFinite(start) && start > 1 ? start + max - 1 : max}</span></span>
+      <span class="progress-label">{reviewing ? 'Ledger review' : <>{m.protocol === 'pair' ? 'Cycle' : 'Round'} {(Number.isFinite(start) && start > 1 ? start - 1 : 0) + Math.min(max, running ? done + (turns.some((t) => t.round > 0) || done === 0 ? 1 : 0) : done)}<span class="muted"> / {Number.isFinite(start) && start > 1 ? start + max - 1 : max}</span></>}</span>
       <span class={`progress-track ${running ? 'running' : ''}`}><span style={{ width: `${pct}%` }} /></span>
     </div>
   );
 }
 
-export function RunView({ id }: { id: string }) {
+export function RunView({ id }: { id: string; }) {
   const d = runs.value[id];
   const summary = app.value?.runs.find((r) => r.id === id);
   const logs = runLogs.value[id] ?? [];
@@ -449,12 +461,15 @@ export function RunView({ id }: { id: string }) {
   if (!d) return <div class="center"><Spinner /></div>;
   const m = d.meta;
   const running = d.running || summary?.status === 'running';
-  const p = PROTOCOLS[m.protocol];
+  const p = PROTOCOLS[m.protocol] ?? PROTOCOLS.custom;
   const tone = outcomeTone(running ? 'running' : m.status, m.outcome);
   const stop = String(m.outcome?.stop ?? '');
+  const method = d.template ?? d.draftTemplate;
   const tabs = [
     { id: 'live', label: m.protocol === 'pair' ? 'Cycles' : 'Rounds' },
-    ...(m.protocol === 'pair' ? [{ id: 'changes', label: 'Changes' }, { id: 'pfindings', label: 'Findings', count: d.pair?.findings.filter((f) => f.status === 'open').length }] : []),
+    ...(m.workspace ? [{ id: 'changes', label: 'Changes' }] : []),
+    ...(m.protocol === 'pair' ? [{ id: 'pfindings', label: 'Findings', count: d.pair?.findings.filter((f) => f.status === 'open').length }] : []),
+    ...(method ? [{ id: 'method', label: d.draftTemplate ? 'Draft method' : 'Method' }] : []),
     ...(m.protocol === 'debate' ? [{ id: 'ledger', label: 'Claim ledger' }] : []),
     ...(m.protocol === 'review' ? [{ id: 'findings', label: 'Findings', count: d.findings?.length }] : []),
     ...(m.protocol === 'council' ? [{ id: 'ranking', label: 'Ranking' }] : []),
@@ -504,7 +519,7 @@ export function RunView({ id }: { id: string }) {
             {canContinue && /NOT converged|stalled|deadlocked|stopped|cancelled|failed/.test(stop) && <button type="button" class="btn small" onClick={() => setCont(true)}><Icon name="play" size={12} /> Continue</button>}
           </div>
         )}
-        {m.protocol === 'pair' && <WorkspaceBar d={d} running={running} />}
+        {m.workspace && <WorkspaceBar d={d} running={running} />}
       </header>
       <Tabs active={tab} onChange={setTab} tabs={tabs} />
       <div class="run-body" onClick={onCopyClick}>
@@ -522,6 +537,7 @@ export function RunView({ id }: { id: string }) {
         {tab === 'report' && (d.report ? <div class="pad prose"><Markdown text={d.report} /></div> : <Empty icon="file" title={running ? 'The report appears when the run finishes' : 'No report'} />)}
         {tab === 'brief' && <div class="pad prose"><Markdown text={m.prompt} /></div>}
         {tab === 'transcript' && <div class="pad prose"><Markdown text={d.transcript ?? ''} /></div>}
+        {tab === 'method' && <div class="pad"><div class="row wrap"><h3>{method?.name}</h3><span class="spacer" />{method && <button type="button" class="btn small" onClick={() => go({ kind: 'new-run', draft: { protocol: 'custom', template: method.id === method.library ? { ...method, id: `${method.id}-custom-${Date.now().toString(36)}`, name: `${method.name} copy` } : method, brief: d.draftTemplate ? '' : m.prompt } })}><Icon name="edit" size={13} />Edit in visual builder</button>}</div><p class="muted small">{d.draftTemplate ? 'The validated draft created by the author model. Open it in the builder to review, save or revise it.' : 'The exact definition saved for this run.'}</p><pre class="io tall">{JSON.stringify(method, null, 2)}</pre>{d.coordination && <><h3>Workflow state and retained memory</h3><pre class="io tall">{JSON.stringify(d.coordination, null, 2)}</pre></>}</div>}
         {tab === 'log' && (logs.length ? <pre class="io log tall">{logs.join('\n')}</pre> : <Empty icon="list" title="No activity in this session">Activity is shown for runs started since the app opened; the full record is in the Transcript and the run files.</Empty>)}
       </div>
       {openTurn !== null && <TurnModal runId={m.id} n={openTurn} onClose={() => setOpenTurn(null)} />}
@@ -538,6 +554,7 @@ const BRIEF_HINTS: Record<Protocol, string> = {
   review: 'Focus (optional): e.g. concurrency and error paths.',
   council: 'The question for the council. Each seat answers independently; then they rank each other anonymously.',
   ask: 'The question. Every seat answers in parallel.',
+  custom: 'The task or question your coordination method should handle.',
 };
 
 function quotaWarnings(seats: string[]): string[] {
@@ -554,9 +571,12 @@ function quotaWarnings(seats: string[]): string[] {
   return out;
 }
 
-export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
+export function NewRun({ draft }: { draft?: Partial<StartRun>; }) {
+  const form = useRef<HTMLDivElement>(null);
   const s = app.value!;
   const preset = s.presets[s.defaults.preset];
+  const [template, setTemplate] = useState<CoordinationTemplate | undefined>(typeof draft?.template === 'object' ? draft.template : undefined);
+  const [templateDraft, setTemplateDraft] = useState(template);
   const [protocol, setProtocol] = useState<Protocol>(draft?.protocol ?? 'pair');
   const remembered = prefs.value.lastSeats?.[protocol];
   const initialSeats = (p: Protocol) => draft?.seats ?? prefs.value.lastSeats?.[p]?.seats ?? (p === 'pair' ? [s.gui.codex.spec, s.gui.claude.spec] : preset?.seats ?? [s.gui.codex.spec, s.gui.claude.spec]);
@@ -571,14 +591,19 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
   const [isolation, setIsolation] = useState<'worktree' | 'in-place'>('worktree');
   const [writerAccess, setWriterAccess] = useState<'sandboxed' | 'sandboxed-network' | 'full'>('sandboxed');
   const [check, setCheck] = useState('');
-  const [ws, setWs] = useState<{ git: boolean; head: boolean; dirty: boolean } | null>(null);
+  const [ws, setWs] = useState<{ git: boolean; head: boolean; dirty: boolean; } | null>(null);
   const cwd = draft?.cwd ?? project.value;
   const noProject = !cwd;
   const mode = PROTOCOLS[protocol];
-  const needsProject = protocol === 'pair' || protocol === 'review';
+  const library = protocol === 'custom' ? templateDraft?.library : undefined;
+  const isPair = protocol === 'pair' || library === 'pair';
+  const pairSeats = [seats[0] ?? s.gui.codex.spec, seats[1] ?? s.gui.claude.spec];
+  const isReview = protocol === 'review' || library === 'review';
+  useEffect(() => { if (library === 'pair') setRounds(4); else if (library === 'review') setRounds(2); else if (library === 'debate') setRounds(preset?.rounds ?? 3); }, [library]);
+  const needsProject = isPair || isReview || (protocol === 'custom' && Object.values(templateDraft?.roles ?? {}).some((r) => r.access && r.access !== 'read'));
   useEffect(() => {
     if (!cwd) return setWs(null);
-    void api<{ git: boolean; head: boolean; dirty: boolean }>(`/api/fs/workspace?cwd=${encodeURIComponent(cwd)}`).then((r) => {
+    void api<{ git: boolean; head: boolean; dirty: boolean; }>(`/api/fs/workspace?cwd=${encodeURIComponent(cwd)}`).then((r) => {
       setWs(r);
       // A repository with history gets an isolated worktree by default; anything else works in place.
       setIsolation(r.head ? 'worktree' : 'in-place');
@@ -593,33 +618,37 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
   const applyPreset = (name: string) => {
     const pr = s.presets[name];
     if (!pr) return;
-    setSeats(protocol === 'pair' ? pr.seats.slice(0, 2) : pr.seats);
+    setSeats(isPair ? pr.seats.slice(0, 2) : pr.seats);
     setChair(pr.chair);
     if (pr.rounds && protocol === 'debate') setRounds(pr.rounds);
   };
   const submit = () => {
+    for (const input of form.current?.querySelectorAll<HTMLInputElement>('input[type="number"]') ?? []) if (!input.reportValidity()) return;
+    if (protocol === 'custom' && !template) return toast('Create or load a valid template first');
     if (needsProject && noProject) return toast(`${mode.label} works on a project folder; pick one at the top`);
-    if (protocol !== 'review' && !brief.trim()) return toast(protocol === 'pair' ? 'Describe the task first' : 'Write the question or brief first');
-    if (protocol === 'review' && kind !== 'uncommitted' && !value.trim()) return toast('Fill in the branch, commit or plan file');
-    if (protocol === 'pair' && isolation === 'worktree' && ws && !ws.head) return toast('A worktree needs a git repository with at least one commit; choose “In place”');
+    if (!isReview && !brief.trim()) return toast(isPair ? 'Describe the task first' : 'Write the question or brief first');
+    if (isReview && kind !== 'uncommitted' && !value.trim()) return toast('Fill in the branch, commit or plan file');
+    if (isPair && isolation === 'worktree' && ws && !ws.head) return toast('A worktree needs a git repository with at least one commit; choose “In place”');
+    if ((protocol === 'debate' || library === 'debate') && minRounds > rounds) return toast('Minimum rounds cannot exceed the maximum');
     void startRun({
       protocol,
-      seats,
-      chair: protocol === 'pair' ? undefined : chair,
-      rounds: protocol === 'debate' || protocol === 'pair' ? rounds : protocol === 'review' ? Math.min(rounds, 2) : 1,
-      minRounds: protocol === 'debate' ? minRounds : undefined,
+      ...(protocol === 'custom' ? { template } : {}),
+      seats: isPair ? pairSeats : seats,
+      chair: isPair || (protocol === 'custom' && !library) ? undefined : chair,
+      rounds: protocol === 'debate' || isPair || protocol === 'custom' ? rounds : isReview ? Math.min(rounds, 2) : 1,
+      minRounds: protocol === 'debate' || library === 'debate' ? minRounds : undefined,
       anon,
       cwd,
       noProject,
-      brief: protocol === 'review' ? brief || `Review ${kind}` : brief,
-      review: protocol === 'review' ? { kind, value: value || undefined, focus: brief || undefined } : undefined,
-      pair: protocol === 'pair' ? { isolation, writerAccess, check: check.trim() || undefined } : undefined,
+      brief: isReview ? brief || `Review ${kind}` : brief,
+      review: isReview ? { kind, value: value || undefined, focus: brief || undefined } : undefined,
+      pair: isPair ? { isolation, writerAccess, check: check.trim() || undefined } : undefined,
     });
   };
-  const min = protocol === 'review' || protocol === 'ask' ? 1 : 2;
+  const min = isPair ? 2 : protocol === 'custom' ? templateDraft?.limits.minSeats ?? 1 : isReview || protocol === 'ask' ? 1 : 2;
   const warnings = quotaWarnings(seats);
   return (
-    <div class="newrun" onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } }}>
+    <div ref={form} class={`newrun ${protocol === 'custom' ? 'custom' : ''}`} onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } }}>
       <div class="newrun-main">
         <h1>New run</h1>
         <div class="proto-cards">
@@ -631,25 +660,27 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
           ))}
         </div>
 
+        {protocol === 'custom' && <TemplateEditor initial={templateDraft} seats={seats} onChange={setTemplate} onDraft={setTemplateDraft} />}
+
         <section class="form-section">
           <div class="section-head">
-            <h3>{protocol === 'pair' ? 'Writer and reviewer' : 'Seats'}</h3>
+            <h3>{isPair ? 'Writer and reviewer' : 'Seats'}</h3>
             <select class="preset-select" value="" onChange={(e) => applyPreset((e.target as HTMLSelectElement).value)}>
               <option value="">Load preset…</option>
               {Object.entries(s.presets).map(([k, pr]) => <option value={k}>{k} — {pr.seats.map(shortSpec).join(' vs ')}</option>)}
             </select>
           </div>
-          {protocol === 'pair' ? (
+          {isPair ? (
             <div class="pair-seats">
               <div class="seat-row">
                 <span class="seat-role">Writer</span>
-                <SeatPicker spec={seats[0]} onChange={(v) => setSeats([v, seats[1]])} />
+                <SeatPicker spec={pairSeats[0]} onChange={(v) => setSeats([v, pairSeats[1]])} />
                 <span class="muted small">implements the task and fixes findings</span>
               </div>
-              <button type="button" class="icon-btn swap" title="Swap writer and reviewer" onClick={() => setSeats([seats[1], seats[0]])}><Icon name="refresh" size={14} /></button>
+              <button type="button" class="icon-btn swap" title="Swap writer and reviewer" onClick={() => setSeats([pairSeats[1], pairSeats[0]])}><Icon name="refresh" size={14} /></button>
               <div class="seat-row">
                 <span class="seat-role">Reviewer</span>
-                <SeatPicker spec={seats[1]} seat onChange={(v) => setSeats([seats[0], v])} />
+                <SeatPicker spec={pairSeats[1]} seat onChange={(v) => setSeats([pairSeats[0], v])} />
                 <span class="muted small">verifies the diff and files findings (read-only)</span>
               </div>
             </div>
@@ -657,7 +688,7 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
             <>
               {seats.map((spec, i) => (
                 <div class="seat-row">
-                  <span class="seat-id">{String.fromCharCode(65 + i)}</span>
+                  <span class="seat-id">{seatId(i)}</span>
                   <SeatPicker spec={spec} seat onChange={(v) => setSeats(seats.map((x, j) => (j === i ? v : x)))} />
                   <span class="mono muted small seat-spec">{spec}</span>
                   <button type="button" class="icon-btn" disabled={seats.length <= min} title="Remove seat" onClick={() => setSeats(seats.filter((_, j) => j !== i))}><Icon name="trash" size={14} /></button>
@@ -667,30 +698,30 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
                 <button type="button" class="btn small" onClick={() => setSeats([...seats, s.gui.claude.spec])}><EngineMark engine="claude" size={14} /> Add Claude</button>
                 <button type="button" class="btn small" onClick={() => setSeats([...seats, s.gui.codex.spec])}><EngineMark engine="codex" size={14} /> Add Codex</button>
               </div>
-              <div class="seat-row chair-row">
+              {protocol !== 'custom' || library ? <div class="seat-row chair-row">
                 <Toggle checked={!!chair} onChange={(v) => setChair(v ? chair ?? s.gui.claude.spec : undefined)} label="A chair writes the final synthesis" />
                 {chair && <SeatPicker spec={chair} seat onChange={setChair} />}
-              </div>
+              </div> : null}
             </>
           )}
         </section>
 
         <section class="form-section">
-          <h3>{protocol === 'review' ? 'What to review' : protocol === 'pair' ? 'Task' : 'Brief'}</h3>
-          {protocol === 'review' && (
+          <h3>{isReview ? 'What to review' : isPair ? 'Task' : 'Brief'}</h3>
+          {isReview && (
             <div class="row wrap">
               <Segmented size="small" value={kind} onChange={setKind} options={[{ id: 'uncommitted', label: 'Uncommitted changes' }, { id: 'base', label: 'Branch vs base' }, { id: 'commit', label: 'One commit' }, { id: 'plan', label: 'Plan / design file' }]} />
               {kind !== 'uncommitted' && <input class="mono" placeholder={{ base: 'main', commit: 'commit SHA', plan: 'path/to/plan.md' }[kind]} value={value} onInput={(e) => setValue((e.target as HTMLInputElement).value)} />}
             </div>
           )}
-          <textarea class="brief" rows={protocol === 'review' ? 3 : 7} value={brief} onInput={(e) => setBrief((e.target as HTMLTextAreaElement).value)} placeholder={BRIEF_HINTS[protocol]} />
+          <textarea class="brief" rows={isReview ? 3 : 7} value={brief} onInput={(e) => setBrief((e.target as HTMLTextAreaElement).value)} placeholder={BRIEF_HINTS[library ?? protocol]} />
           <div class="muted small row">
             <Icon name={noProject ? 'folder-off' : 'folder'} size={13} />
             {noProject ? (needsProject ? <span class="bad-text">{mode.label} needs a project folder: choose one at the top.</span> : 'No project folder: the seats get an empty scratch folder and answer from what they know.') : <span class="mono ellipsis" title={cwd}>{cwd.replace(app.value?.home ?? '\u0000', '~')}</span>}
           </div>
         </section>
 
-        {protocol === 'pair' && (
+        {isPair && (
           <section class="form-section">
             <h3>Workspace and permissions</h3>
             <div class="field-grid">
@@ -711,34 +742,34 @@ export function NewRun({ draft }: { draft?: Partial<StartRun> }) {
                 <span class="muted small">duo runs it after every writer turn; the run only finishes when it passes. It runs with your permissions.</span>
               </label>
               <label class="field">Cycles at most
-                <input type="number" min={1} max={12} value={rounds} onInput={(e) => setRounds(Number((e.target as HTMLInputElement).value) || 1)} />
+                <IntegerInput value={rounds} onChange={setRounds} />
               </label>
             </div>
           </section>
         )}
 
-        {protocol !== 'pair' && (
+        {!isPair && (
           <section class="form-section row wrap">
-            {protocol === 'debate' && <label class="field inline">Max rounds <input type="number" min={1} max={12} value={rounds} onInput={(e) => setRounds(Number((e.target as HTMLInputElement).value) || 1)} /></label>}
-            {protocol === 'debate' && <label class="field inline">Min rounds <input type="number" min={1} max={12} value={minRounds} onInput={(e) => setMinRounds(Number((e.target as HTMLInputElement).value) || 1)} /></label>}
-            {protocol === 'review' && <Toggle checked={rounds >= 2} onChange={(v) => setRounds(v ? 2 : 1)} label="Cross-validate findings" />}
-            <Toggle checked={anon} onChange={setAnon} label="Hide model identities from peers" />
+            {(protocol === 'debate' || library === 'debate') && <label class="field inline">Max rounds / cycles <IntegerInput value={rounds} onChange={setRounds} /></label>}
+            {(protocol === 'debate' || library === 'debate') && <label class="field inline">Min rounds <IntegerInput value={minRounds} onChange={setMinRounds} /></label>}
+            {isReview && <Toggle checked={rounds >= 2} onChange={(v) => setRounds(v ? 2 : 1)} label="Cross-validate findings" />}
+            {protocol !== 'custom' || library ? <Toggle checked={anon} onChange={setAnon} label="Hide model identities from peers" /> : null}
           </section>
         )}
 
         {warnings.map((w) => <div class="callout warn"><Icon name="alert" size={15} /><span>{w}</span></div>)}
 
         <div class="form-actions">
-          <span class="muted small">{seats.map((x) => parseSpec(x).model || parseSpec(x).engine).join(protocol === 'pair' ? ' writes · ' : ' vs ')}{protocol === 'pair' ? ' reviews' : ''}</span>
+          <span class="muted small">{seats.map((x) => parseSpec(x).model || parseSpec(x).engine).join(isPair ? ' writes · ' : ' vs ')}{isPair ? ' reviews' : ''}</span>
           <div class="spacer" />
           <span class="muted small"><Kbd>{MOD}</Kbd>+<Kbd>Enter</Kbd></span>
-          <button type="button" class="btn primary big" onClick={submit}><Icon name="play" size={14} /> Start {mode.label.toLowerCase()}</button>
+          <button type="button" class="btn primary big" disabled={protocol === 'custom' && !template} onClick={submit}><Icon name="play" size={14} /> Start {mode.label.toLowerCase()}</button>
         </div>
       </div>
       <aside class="newrun-side">
         <div class="side-card">
           <div class="side-card-head"><Icon name={mode.icon} size={16} /> How {mode.label.toLowerCase()} works</div>
-          <ModeDemo mode={mode.mode} size="large" caption />
+          {protocol === 'custom' ? <div class="template-guide"><p class="muted small">Start with a built-in copy, build a method from scratch, or use Describe with AI.</p><ol><li>Give each role a responsibility and starting models.</li><li>Connect turns and choose what context they share.</li><li>Set role-change rules, completion and memory limits.</li></ol><p class="muted small">Save the method to reuse it. Start custom runs the current draft.</p></div> : <ModeDemo mode={mode.mode} size="large" caption />}
           <p class="muted small">{mode.help}</p>
         </div>
       </aside>

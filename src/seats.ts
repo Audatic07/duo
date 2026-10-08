@@ -1,3 +1,4 @@
+import { seatId } from './seat-ids.ts';
 /**
  * Seats: who takes part in a run, on which engine, model and effort.
  *
@@ -181,7 +182,7 @@ export function seatPeerName(seat: Seat): string {
 }
 
 export function seatIds(n: number): string[] {
-  return Array.from({ length: n }, (_, i) => String.fromCharCode(65 + i));
+  return Array.from({ length: n }, (_, i) => seatId(i));
 }
 
 /** The Codex `-c key=value` overrides a seat implies (values are TOML). */

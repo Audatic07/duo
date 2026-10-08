@@ -42,6 +42,11 @@ const sandbox = valueOf(args, '--sandbox') ?? (args.find((a) => a.startsWith('sa
 if (sandbox === 'workspace-write' || sandbox === 'danger-full-access') writeFileSync('duo-fake.txt', `written by the fake writer\n${prompt.split('\n')[0]}\n`);
 
 const schemaPath = valueOf(args, '--output-schema');
-const text = schemaPath ? JSON.stringify(instance(JSON.parse(readFileSync(schemaPath, 'utf8')), { answer: `codex answer: ${prompt.length} chars` })) : `codex answer: ${prompt.length} chars`;
+const outputSchema = schemaPath ? JSON.parse(readFileSync(schemaPath, 'utf8')) : undefined;
+const generated = outputSchema?.properties?.templateJson && process.env.FAKE_TEMPLATE_FILE ? {
+  templateJson: process.env.FAKE_TEMPLATE_INVALID_FIRST && !/draft failed validation/i.test(prompt) ? '{}' : readFileSync(process.env.FAKE_TEMPLATE_FILE, 'utf8'),
+  explanation: 'A validated fake draft',
+} : undefined;
+const text = generated ? JSON.stringify(generated) : schemaPath ? JSON.stringify(instance(JSON.parse(readFileSync(schemaPath, 'utf8')), { answer: `codex answer: ${prompt.length} chars` })) : `codex answer: ${prompt.length} chars`;
 out({ type: 'item.completed', item: { id: 'msg', type: 'agent_message', text } });
 out({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 50, reasoning_output_tokens: 10 } });

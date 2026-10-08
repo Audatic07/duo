@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+## 0.3.0 — 2026-10-08
+
+- **Custom Templates are the universal foundation for every Duo method.** Pair, Debate, Review, Council and Ask are fully constructed as templates in the same system, and all five can be recreated from a new method in the visual maker.
+- Debate ends with every model reviewing the frozen claim ledger and explicitly agreeing or disagreeing with every peer claim. Incomplete reviews retry once and fail if still incomplete; reports, the run view, and continued debates retain the final decisions.
+- The visual maker can create all five shipped methods from a new draft and add every built-in stage. Stage prompts, debate policies and round limits, shared context, starting model assignments and native response schemas (including nullable fields) are editable through the same definitions used by the executor.
+
+- Custom coordination templates: versioned role and workflow definitions, model eligibility and ranking, conditional role changes, selective routing, structured replies, completion and exception rules, and bounded execution.
+- Persistent memory channels with selected fields, role access rules, run or template scope, and entry/character retention limits.
+- A visual desktop template builder for workflows, roles, routing, structured responses, conditions, memory and limits, with undo/redo and an explicitly selected JSON editor. Model-assisted authoring/repair/revision, saved templates, built-in copies, and a Method tab record the exact definition and state. Matching `duo template` CLI and authenticated local APIs.
+- Migrated Pair, Debate, Review, Council and Ask to the shared workflow executor. Regression snapshots from the original implementations cover prompts, schemas, outcomes, reports and domain artifacts in 13 scenarios.
+- Fixed eligible-seat selection when a count chooses only part of the pool, retained exception details through recovery/terminal steps, rejected ambiguous routes, and made malformed-template validation return actionable errors instead of crashing.
+- Discarding JSON restores the visual draft across mode switches. Round and cycle counts can be cleared and retyped without inserting a default; invalid minimum/maximum rounds and CLI timeouts are refused.
+- Saved templates can be deleted in the builder, and memory clearing asks for confirmation. Saving removed or run-only channels and deleting saved methods clears their cross-run storage.
+- Generated drafts can be recovered from their authoring run and reopened in the visual builder. Recorded run methods can also be reopened for editing; seat columns stay in order beyond 25 models.
+- Copied native methods reject additional write roles that would bypass native workspace isolation; fully custom write methods require explicit isolation.
+- GUI cache checks all imported dependencies and generated assets, rebuilding after shared-code changes or missing CSS/fonts.
+- Isolated desktop smoke checks with fake providers, bounded startup and useful failures. Added source release bundles with dependency lockfiles, built GUI, checksums, release notes and a checked draft-release workflow.
+
 ## 0.2.0
 
 ### New

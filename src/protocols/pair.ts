@@ -22,6 +22,9 @@ import { parseSeat, type Seat } from '../seats.ts';
 import { RunStore, type TurnRecord } from '../store.ts';
 import { prepareWorkspace, runCheck, workspaceDiff, type Workspace } from '../worktree.ts';
 import { RunContext, type RunOptions } from './common.ts';
+import { nativeSchema, nativeSeats, runBuiltin } from '../templates/builtins.ts';
+import { templateOperationSettings } from '../templates/operations.ts';
+import type { CoordinationTemplate } from '../templates/types.ts';
 import type { ContinueOptions } from './continue.ts';
 
 export type WriterAccess = 'sandboxed' | 'sandboxed-network' | 'full';
@@ -43,15 +46,15 @@ export interface TrackedFinding {
   opened: number;
   status: 'open' | 'resolved';
   disputes: number;
-  history: { cycle: number; event: string; note?: string }[];
+  history: { cycle: number; event: string; note?: string; }[];
 }
 
 export interface PairCycle {
   cycle: number;
-  writer?: { n: number; status: string; summary: string; changes: number; tests: PairWriterTurn['tests']; error?: string };
-  check?: { exitCode: number | null; timedOut: boolean; durationMs: number };
-  diff?: { files: number; stat: string };
-  review?: { n: number; verdict: string; summary: string; open: number; blocking: number; requirements: PairReviewTurn['requirements']; error?: string };
+  writer?: { n: number; status: string; summary: string; changes: number; tests: PairWriterTurn['tests']; error?: string; };
+  check?: { exitCode: number | null; timedOut: boolean; durationMs: number; };
+  diff?: { files: number; stat: string; };
+  review?: { n: number; verdict: string; summary: string; open: number; blocking: number; requirements: PairReviewTurn['requirements']; error?: string; };
 }
 
 export interface PairState {
@@ -60,7 +63,7 @@ export interface PairState {
   reviewer: string;
   cycles: PairCycle[];
   findings: TrackedFinding[];
-  checks: (CheckResult & { cycle: number })[];
+  checks: (CheckResult & { cycle: number; })[];
 }
 
 const BLOCKING = new Set(['P0', 'P1']);
@@ -128,10 +131,13 @@ class Findings {
   }
 }
 
-export async function pair(ctx: RunContext, settings: PairSettings, resume?: { sessions: [SeatSession, SeatSession]; workspace: Workspace; state: PairState; note?: string; startCycle: number }): Promise<string> {
-  const { seats, rounds: maxNew, anon, brief } = ctx.opts;
+export async function pair(ctx: RunContext, settings: PairSettings, resume?: { sessions: [SeatSession, SeatSession]; workspace: Workspace; state: PairState; note?: string; startCycle: number; }): Promise<string> {
+  const { seats, anon, brief } = ctx.opts;
+  const maxNew = Number(templateOperationSettings(ctx.opts.extra.template as CoordinationTemplate | undefined, 'pair.cycle').rounds) || ctx.opts.rounds;
   if (seats.length !== 2) throw new Error('pair needs exactly two seats: the writer, then the reviewer');
-  const [writerSeat, reviewerSeat] = seats;
+  const writers = nativeSeats(ctx, 'writer', seats.slice(0, 1)), reviewers = nativeSeats(ctx, 'reviewer', seats.slice(1));
+  const [writerSeat] = writers, [reviewerSeat] = reviewers;
+  if (writers.length !== 1 || reviewers.length !== 1 || writerSeat.id === reviewerSeat.id) throw new Error('pair needs exactly one distinct writer and reviewer assignment');
   ctx.minSeats = 2;
   const names = { [writerSeat.id]: participantName(writerSeat, false), [reviewerSeat.id]: participantName(reviewerSeat, false) };
   const sessions: SeatSession[] = resume ? [...resume.sessions] : [];
@@ -147,127 +153,138 @@ export async function pair(ctx: RunContext, settings: PairSettings, resume?: { s
     }
   };
   const first = resume?.startCycle ?? 1;
-  const last = first + maxNew - 1;
+  let last = first + maxNew - 1;
   let stop = `NOT converged after ${last} cycle(s)`;
   let converged = false;
   let lastReview: PairReviewTurn | undefined;
   let lastReviewRaw: string | undefined;
   let lastCheck: CheckResult | undefined;
 
+  let cycle = first;
+  let report = '';
+  let writer: SeatSession, reviewer: SeatSession;
+  const writerValid = (t: TurnRecord) => (asPairWriterTurn(t.structured) ? undefined : t.parseError ?? 'the reply did not match the report format');
+  const reviewValid = (t: TurnRecord) => (asPairReviewTurn(t.structured) ? undefined : t.parseError ?? 'the reply did not match the review format');
   try {
-    if (!ws) {
-      ctx.log(`preparing the workspace (${settings.isolation})`);
-      ws = prepareWorkspace(ctx.opts.cwd, ctx.store.meta.id, ctx.store.meta.title, settings.isolation);
-      ctx.log(ws.mode === 'worktree' ? `worktree ${ws.path} on branch ${ws.branch} (from ${ws.base.slice(0, 10)})` : `working in place in ${ws.cwd} (snapshot ${ws.base.slice(0, 10)})`);
-      save();
-    }
-    const rulesCtx: PairRulesContext = { cwd: ws.cwd, writer: writerSeat, reviewer: reviewerSeat, anon, check: settings.check };
-    if (!resume) {
-      sessions.push(await ctx.engines.openSeat(writerSeat, 'writer', { schema: PAIR_WRITER_SCHEMA, system: writerRules(rulesCtx), cwd: ws.cwd, access: writerSeatAccess(settings.writerAccess) }));
-      sessions.push(await ctx.engines.openSeat(reviewerSeat, 'participant', { schema: PAIR_REVIEW_SCHEMA, system: reviewerRules(rulesCtx), cwd: ws.cwd, hideSkills: true }));
-    }
-    ctx.recordSeats(sessions);
-    const [writer, reviewer] = sessions;
-    const writerValid = (t: TurnRecord) => (asPairWriterTurn(t.structured) ? undefined : t.parseError ?? 'the reply did not match the report format');
-    const reviewValid = (t: TurnRecord) => (asPairReviewTurn(t.structured) ? undefined : t.parseError ?? 'the reply did not match the review format');
+    const workflow = await runBuiltin(ctx, 'pair', {
+      'pair.prepare': async () => {
+        if (!ws) {
+          ctx.log(`preparing the workspace (${settings.isolation})`);
+          ws = prepareWorkspace(ctx.opts.cwd, ctx.store.meta.id, ctx.store.meta.title, settings.isolation);
+          ctx.log(ws.mode === 'worktree' ? `worktree ${ws.path} on branch ${ws.branch} (from ${ws.base.slice(0, 10)})` : `working in place in ${ws.cwd} (snapshot ${ws.base.slice(0, 10)})`);
+          save();
+        }
+        const rulesCtx: PairRulesContext = { cwd: ws.cwd, writer: writerSeat, reviewer: reviewerSeat, anon, check: settings.check };
+        if (!resume) {
+          sessions.push(await ctx.engines.openSeat(writerSeat, 'writer', { schema: nativeSchema(ctx, 'writer', PAIR_WRITER_SCHEMA), system: writerRules(rulesCtx), cwd: ws.cwd, access: writerSeatAccess(settings.writerAccess) }));
+          sessions.push(await ctx.engines.openSeat(reviewerSeat, 'participant', { schema: nativeSchema(ctx, 'reviewer', PAIR_REVIEW_SCHEMA), system: reviewerRules(rulesCtx), cwd: ws.cwd, hideSkills: true }));
+        }
+        ctx.recordSeats(sessions);
+        [writer, reviewer] = sessions;
 
-    if (resume) {
-      const prevCycle = state.cycles[state.cycles.length - 1];
-      lastReview = prevCycle?.review ? { verdict: prevCycle.review.verdict as PairReviewTurn['verdict'], summary: prevCycle.review.summary, requirements: prevCycle.review.requirements, findings: findings.open(), resolved: [], confidence: NaN } : undefined;
-      lastCheck = state.checks[state.checks.length - 1];
-    }
+        if (resume) {
+          const prevCycle = state.cycles[state.cycles.length - 1];
+          lastReview = prevCycle?.review ? { verdict: prevCycle.review.verdict as PairReviewTurn['verdict'], summary: prevCycle.review.summary, requirements: prevCycle.review.requirements, findings: findings.open(), resolved: [], confidence: NaN } : undefined;
+          lastCheck = state.checks[state.checks.length - 1];
+        }
 
-    for (let cycle = first; cycle <= last; cycle++) {
-      ctx.checkpoint();
-      const c: PairCycle = { cycle };
-      state.cycles.push(c);
-      save();
-
-      // ── writer ──
-      ctx.log(`cycle ${cycle}: ${writerSeat.id} writes`);
-      const wmsg = cycle === 1
-        ? pairTask(brief, settings.check)
-        : pairRevise({ cycle, maxCycles: last, review: lastReview, rawReview: lastReviewRaw, check: lastCheck && lastCheck.exitCode !== 0 ? lastCheck : undefined, note: cycle === first ? resume?.note : undefined });
-      const wt = await ctx.send(writer, wmsg, { round: cycle, kind: cycle === 1 ? 'implement' : 'revise' }, writerValid);
-      ctx.checkpoint();
-      const w = asPairWriterTurn(wt.structured);
-      c.writer = { n: wt.n, status: w?.status ?? (wt.error ? 'error' : 'unknown'), summary: w?.summary ?? wt.reply.slice(0, 4000), changes: w?.changes.length ?? 0, tests: w?.tests ?? [], error: wt.error };
-      ctx.seatLine(writerSeat, wt, w ? `${w.status} · ${w.changes.length} files · ${w.tests.length} checks${w.responses.length ? ` · ${w.responses.length} responses` : ''}` : 'no usable report');
-      ctx.store.appendTranscript(`[cycle ${cycle}] ${names[writerSeat.id]} — ${wt.kind}`, w ? renderWriter(w) : wt.reply || `(error: ${wt.error})`);
-      if (w) findings.writerResponded(cycle, w);
-      if (!w && wt.error) {
-        stop = `failed: the writer (${writerSeat.engine}:${writerSeat.model}) failed: ${wt.error.slice(0, 400)}`;
-        break;
-      }
-      if (w?.status === 'blocked') {
-        stop = `blocked: ${w.blocker ?? 'the writer could not continue'}`;
-        save();
-        break;
-      }
-
-      // ── check and diff ──
-      if (settings.check) {
-        ctx.log(`cycle ${cycle}: running \`${settings.check}\``);
-        lastCheck = await runCheck(settings.check, ws.cwd);
-        state.checks.push({ ...lastCheck, cycle });
-        c.check = { exitCode: lastCheck.exitCode, timedOut: lastCheck.timedOut, durationMs: lastCheck.durationMs };
-        ctx.log(`check ${lastCheck.timedOut ? 'timed out' : lastCheck.exitCode === 0 ? 'passed' : `failed (exit ${lastCheck.exitCode})`} in ${(lastCheck.durationMs / 1000).toFixed(0)}s`);
+      },
+      'pair.cycle': async (flow) => {
+        last = first + (Number(templateOperationSettings(ctx.opts.extra.template as CoordinationTemplate | undefined, 'pair.cycle', flow.step).rounds) || ctx.opts.rounds) - 1;
         ctx.checkpoint();
-      }
-      const d = workspaceDiff(ws, Math.floor(ctx.cfg.maxDiffChars / 2));
-      c.diff = { files: d.files.length, stat: d.stat };
-      save();
+        const c: PairCycle = { cycle };
+        state.cycles.push(c);
+        save();
 
-      // ── reviewer ──
-      ctx.log(`cycle ${cycle}: ${reviewerSeat.id} reviews ${d.files.length} changed file(s)`);
-      const rmsg = pairReview({ request: brief, cycle, maxCycles: last, report: w, rawReply: wt.reply, stat: d.stat, diff: d.diff, check: lastCheck, open: findings.open() });
-      const rt = await ctx.send(reviewer, rmsg, { round: cycle, kind: 'review' }, reviewValid);
-      ctx.checkpoint();
-      const rv = asPairReviewTurn(rt.structured);
-      lastReview = rv;
-      lastReviewRaw = rt.reply;
-      if (rv) findings.reviewed(cycle, rv);
-      const blocking = findings.blocking().length;
-      c.review = { n: rt.n, verdict: rv?.verdict ?? (rt.error ? 'error' : 'unknown'), summary: rv?.summary ?? rt.reply.slice(0, 4000), open: findings.open().length, blocking, requirements: rv?.requirements ?? [], error: rt.error };
-      ctx.seatLine(reviewerSeat, rt, rv ? `${rv.verdict} · ${findings.open().length} open (${blocking} blocking)` : 'no usable review');
-      ctx.store.appendTranscript(`[cycle ${cycle}] ${names[reviewerSeat.id]} — review`, rv ? renderReview(rv) : rt.reply || `(error: ${rt.error})`);
-      ctx.emit({ kind: 'round', round: cycle, stats: { cycle, verdict: c.review.verdict, open: c.review.open, blocking, files: d.files.length, check: c.check } });
-      save();
-      if (!rv && rt.error) {
-        stop = `failed: the reviewer (${reviewerSeat.engine}:${reviewerSeat.model}) failed: ${rt.error.slice(0, 400)}`;
-        break;
-      }
+        // ── writer ──
+        ctx.log(`cycle ${cycle}: ${writerSeat.id} writes`);
+        const wmsg = cycle === 1
+          ? pairTask(brief, settings.check)
+          : pairRevise({ cycle, maxCycles: last, review: lastReview, rawReview: lastReviewRaw, check: lastCheck && lastCheck.exitCode !== 0 ? lastCheck : undefined, note: cycle === first ? resume?.note : undefined });
+        const wt = await ctx.send(writer, wmsg, { round: cycle, kind: cycle === 1 ? 'implement' : 'revise' }, writerValid);
+        ctx.checkpoint();
+        const w = asPairWriterTurn(wt.structured);
+        c.writer = { n: wt.n, status: w?.status ?? (wt.error ? 'error' : 'unknown'), summary: w?.summary ?? wt.reply.slice(0, 4000), changes: w?.changes.length ?? 0, tests: w?.tests ?? [], error: wt.error };
+        ctx.seatLine(writerSeat, wt, w ? `${w.status} · ${w.changes.length} files · ${w.tests.length} checks${w.responses.length ? ` · ${w.responses.length} responses` : ''}` : 'no usable report');
+        ctx.store.appendTranscript(`[cycle ${cycle}] ${names[writerSeat.id]} — ${wt.kind}`, w ? renderWriter(w) : wt.reply || `(error: ${wt.error})`);
+        if (w) findings.writerResponded(cycle, w);
+        if (!w && wt.error) {
+          stop = `failed: the writer (${writerSeat.engine}:${writerSeat.model}) failed: ${wt.error.slice(0, 400)}`;
+          flow.vars.done = true; return;
+        }
+        if (w?.status === 'blocked') {
+          stop = `blocked: ${w.blocker ?? 'the writer could not continue'}`;
+          save();
+          flow.vars.done = true; return;
+        }
 
-      const checkOk = !settings.check || (lastCheck?.exitCode === 0 && !lastCheck.timedOut);
-      if (rv?.verdict === 'approve' && blocking === 0 && checkOk && w?.status === 'done') {
-        converged = true;
-        stop = `converged in cycle ${cycle}: the writer reports done, the reviewer approved${settings.check ? ', and the check passed' : ''}`;
-        break;
-      }
-      const dead = findings.deadlocked();
-      if (dead) {
-        stop = `deadlocked in cycle ${cycle}: the writer disputes ${dead.id} ("${dead.title}") and the reviewer keeps it open — your call`;
-        break;
-      }
-      if (cycle === last) {
-        const why = [blocking ? `${blocking} blocking finding(s) open` : '', !checkOk ? 'the check is failing' : '', rv?.verdict === 'approve' ? '' : 'the reviewer has not approved'].filter(Boolean).join(', ');
-        stop = `NOT converged after ${cycle} cycle(s)${why ? `: ${why}` : ''}`;
-      }
-    }
+        // ── check and diff ──
+        if (settings.check) {
+          ctx.log(`cycle ${cycle}: running \`${settings.check}\``);
+          lastCheck = await runCheck(settings.check, ws!.cwd);
+          state.checks.push({ ...lastCheck, cycle });
+          c.check = { exitCode: lastCheck.exitCode, timedOut: lastCheck.timedOut, durationMs: lastCheck.durationMs };
+          ctx.log(`check ${lastCheck.timedOut ? 'timed out' : lastCheck.exitCode === 0 ? 'passed' : `failed (exit ${lastCheck.exitCode})`} in ${(lastCheck.durationMs / 1000).toFixed(0)}s`);
+          ctx.checkpoint();
+        }
+        const d = workspaceDiff(ws!, Math.floor(ctx.cfg.maxDiffChars / 2));
+        c.diff = { files: d.files.length, stat: d.stat };
+        save();
 
-    save();
-    let report = pairReport(ctx, state, ws, stop, names);
-    await ctx.finish(stop.startsWith('failed') ? 'failed' : 'completed', {
-      stop,
-      converged,
-      cycles: state.cycles.length,
-      open: findings.open().length,
-      blocking: findings.blocking().length,
-      workspace: ws.mode,
-    }, sessions);
-    report += '\n\n' + usageSection(ctx.store.meta);
-    ctx.store.writeFile('report.md', report);
-    return report;
+        // ── reviewer ──
+        ctx.log(`cycle ${cycle}: ${reviewerSeat.id} reviews ${d.files.length} changed file(s)`);
+        const rmsg = pairReview({ request: brief, cycle, maxCycles: last, report: w, rawReply: wt.reply, stat: d.stat, diff: d.diff, check: lastCheck, open: findings.open() });
+        const rt = await ctx.send(reviewer, rmsg, { round: cycle, kind: 'review' }, reviewValid);
+        ctx.checkpoint();
+        const rv = asPairReviewTurn(rt.structured);
+        lastReview = rv;
+        lastReviewRaw = rt.reply;
+        if (rv) findings.reviewed(cycle, rv);
+        const blocking = findings.blocking().length;
+        c.review = { n: rt.n, verdict: rv?.verdict ?? (rt.error ? 'error' : 'unknown'), summary: rv?.summary ?? rt.reply.slice(0, 4000), open: findings.open().length, blocking, requirements: rv?.requirements ?? [], error: rt.error };
+        ctx.seatLine(reviewerSeat, rt, rv ? `${rv.verdict} · ${findings.open().length} open (${blocking} blocking)` : 'no usable review');
+        ctx.store.appendTranscript(`[cycle ${cycle}] ${names[reviewerSeat.id]} — review`, rv ? renderReview(rv) : rt.reply || `(error: ${rt.error})`);
+        ctx.emit({ kind: 'round', round: cycle, stats: { cycle, verdict: c.review.verdict, open: c.review.open, blocking, files: d.files.length, check: c.check } });
+        save();
+        if (!rv && rt.error) {
+          stop = `failed: the reviewer (${reviewerSeat.engine}:${reviewerSeat.model}) failed: ${rt.error.slice(0, 400)}`;
+          flow.vars.done = true; return;
+        }
+
+        const checkOk = !settings.check || (lastCheck?.exitCode === 0 && !lastCheck.timedOut);
+        if (rv?.verdict === 'approve' && blocking === 0 && checkOk && w?.status === 'done') {
+          converged = true;
+          stop = `converged in cycle ${cycle}: the writer reports done, the reviewer approved${settings.check ? ', and the check passed' : ''}`;
+          flow.vars.done = true; return;
+        }
+        const dead = findings.deadlocked();
+        if (dead) {
+          stop = `deadlocked in cycle ${cycle}: the writer disputes ${dead.id} ("${dead.title}") and the reviewer keeps it open — your call`;
+          flow.vars.done = true; return;
+        }
+        if (cycle === last) {
+          const why = [blocking ? `${blocking} blocking finding(s) open` : '', !checkOk ? 'the check is failing' : '', rv?.verdict === 'approve' ? '' : 'the reviewer has not approved'].filter(Boolean).join(', ');
+          stop = `NOT converged after ${cycle} cycle(s)${why ? `: ${why}` : ''}`;
+        }
+        if (cycle >= last) flow.vars.done = true;
+        cycle++;
+      },
+      'pair.finish': async () => {
+        save();
+        report = pairReport(ctx, state, ws!, stop, names);
+        await ctx.finish(stop.startsWith('failed') ? 'failed' : 'completed', {
+          stop,
+          converged,
+          cycles: state.cycles.length,
+          open: findings.open().length,
+          blocking: findings.blocking().length,
+          workspace: ws!.mode,
+        }, sessions);
+        report += '\n\n' + usageSection(ctx.store.meta);
+        ctx.store.writeFile('report.md', report);
+      },
+    });
+    return workflow.stop ? ctx.store.readFile('report.md') ?? report : report;
   } catch (e) {
     save();
     await ctx.fail(e, sessions, { converged: false, cycles: state.cycles.length, open: findings.open().length });
@@ -352,7 +369,7 @@ export async function continuePair(cfg: Config, prev: RunStore, note: string, o:
     minRounds: 1,
     anon: !!pm.options.anon,
     quiet: o.quiet,
-    extra: { continuedFrom: pm.id, note, pair: state.settings },
+    extra: { continuedFrom: pm.id, note, pair: state.settings, ...(pm.options.template ? { template: pm.options.template } : {}) },
     sink: o.sink,
   };
   const ctx = RunContext.create(cfg, opts, prev);
@@ -363,8 +380,8 @@ export async function continuePair(cfg: Config, prev: RunStore, note: string, o:
   const sessions: SeatSession[] = [];
   try {
     const rulesCtx: PairRulesContext = { cwd: ws.cwd, writer: seats[0], reviewer: seats[1], anon: opts.anon, check: state.settings.check };
-    sessions.push(await ctx.engines.openSeat(seats[0], 'writer', { schema: PAIR_WRITER_SCHEMA, system: writerRules(rulesCtx), cwd: ws.cwd, access: writerSeatAccess(state.settings.writerAccess), resume: recs[0]! }));
-    sessions.push(await ctx.engines.openSeat(seats[1], 'participant', { schema: PAIR_REVIEW_SCHEMA, system: reviewerRules(rulesCtx), cwd: ws.cwd, hideSkills: true, resume: recs[1]! }));
+    sessions.push(await ctx.engines.openSeat(seats[0], 'writer', { schema: nativeSchema(ctx, 'writer', PAIR_WRITER_SCHEMA), system: writerRules(rulesCtx), cwd: ws.cwd, access: writerSeatAccess(state.settings.writerAccess), resume: recs[0]! }));
+    sessions.push(await ctx.engines.openSeat(seats[1], 'participant', { schema: nativeSchema(ctx, 'reviewer', PAIR_REVIEW_SCHEMA), system: reviewerRules(rulesCtx), cwd: ws.cwd, hideSkills: true, resume: recs[1]! }));
   } catch (e) {
     await ctx.fail(e, sessions);
     throw e;

@@ -17,6 +17,12 @@ export interface Stance {
   round: number;
 }
 
+export interface LedgerReviewPolicy {
+  allowedStances?: string[];
+  requireAllClaims?: boolean;
+  requireReasons?: boolean;
+}
+
 export interface LedgerClaim {
   gid: string;
   owner: string;
@@ -51,6 +57,8 @@ export class ClaimLedger {
   readonly claims = new Map<string, LedgerClaim>();
   readonly verdicts: Record<string, string> = {};
   readonly rounds: RoundStats[] = [];
+  /** Final review of the frozen ledger, separate from the discussion round budget. */
+  resolution?: RoundStats;
   readonly concessions: { seat: string; round: number; text: string }[] = [];
   readonly seats: string[];
   readonly cwd: string;
@@ -62,7 +70,7 @@ export class ClaimLedger {
 
   /** Normalize a peer claim reference ("B:c2", "B c2", "c2" when unambiguous) to a global id. */
   resolveRef(ref: string, from: string): string | undefined {
-    const m = /^\s*([A-Z])\s*[:.\- ]\s*([A-Za-z0-9_-]+)\s*$/.exec(ref);
+    const m = /^\s*([A-Z]+)\s*[:.\- ]\s*([A-Za-z0-9_-]+)\s*$/.exec(ref);
     if (m) {
       const gid = `${m[1]}:${m[2]}`;
       return this.claims.has(gid) ? gid : undefined;
@@ -74,6 +82,7 @@ export class ClaimLedger {
 
   /** Record a seat's turn; returns how many claims were over the cap and not recorded. */
   update(seat: string, round: number, t: DebateTurn): number {
+    this.resolution = undefined;
     const seen = new Set<string>();
     const kept = t.claims.slice(0, CLAIM_HARD_CAP);
     for (const c of kept) {
@@ -102,7 +111,14 @@ export class ClaimLedger {
     for (const c of this.claims.values()) {
       if (c.owner === seat && !seen.has(c.gid) && round > c.introduced) c.withdrawn = true;
     }
-    for (const s of t.stances) {
+    this.recordStances(seat, round, t.stances);
+    for (const text of t.concessions) this.concessions.push({ seat, round, text });
+    this.verdicts[seat] = t.verdict;
+    return t.claims.length - kept.length;
+  }
+
+  private recordStances(seat: string, round: number, stances: DebateTurn['stances']): void {
+    for (const s of stances) {
       const gid = this.resolveRef(s.claim, seat);
       if (!gid) continue;
       const claim = this.claims.get(gid)!;
@@ -110,9 +126,34 @@ export class ClaimLedger {
       claim.stances[seat] = { stance: s.stance, reason: s.reason, round };
       claim.history.push({ seat, round, stance: s.stance });
     }
-    for (const text of t.concessions) this.concessions.push({ seat, round, text });
+  }
+
+  /** A final review must decide every peer claim without changing the claims under review. */
+  reviewError(seat: string, t: DebateTurn, policy: LedgerReviewPolicy = {}): string | undefined {
+    if (t.claims.length || t.concessions.length) return 'the ledger is frozen: claims and concessions must be empty';
+    if (!['agree', 'partial', 'disagree'].includes(t.verdict)) return 'give a final verdict: agree, partial or disagree';
+    const required = new Set(this.active().filter((c) => c.owner !== seat).map((c) => c.gid));
+    const seen = new Set<string>();
+    for (const s of t.stances) {
+      const gid = this.resolveRef(s.claim, seat);
+      if (!gid || !required.has(gid)) return `stance ${s.claim} does not reference an active peer claim`;
+      if (seen.has(gid)) return `give exactly one stance on ${gid}`;
+      const allowed = policy.allowedStances ?? ['agree', 'disagree'];
+      if (!allowed.includes(s.stance)) return `decide ${allowed.join(' or ')} on ${gid}; explain any uncertainty or partial agreement in the reason`;
+      if (policy.requireReasons !== false && (typeof s.reason !== 'string' || !s.reason.trim())) return `give a reason for your stance on ${gid}`;
+      seen.add(gid);
+    }
+    const missing = [...required].filter((gid) => !seen.has(gid));
+    if (policy.requireAllClaims !== false && missing.length) return `missing final stances on: ${missing.join(', ')}`;
+    return undefined;
+  }
+
+  /** Record only stances and verdicts: no revision can invalidate a sibling's final review. */
+  review(seat: string, round: number, t: DebateTurn, policy: LedgerReviewPolicy = {}): void {
+    const error = this.reviewError(seat, t, policy);
+    if (error) throw new Error(error);
+    this.recordStances(seat, round, t.stances);
     this.verdicts[seat] = t.verdict;
-    return t.claims.length - kept.length;
   }
 
   status(c: LedgerClaim): ClaimStatus {
@@ -129,7 +170,7 @@ export class ClaimLedger {
     return [...this.claims.values()].filter((c) => !c.withdrawn);
   }
 
-  closeRound(round: number): RoundStats {
+  private stats(round: number): RoundStats {
     const active = this.active();
     const count = (s: ClaimStatus) => active.filter((c) => this.status(c) === s).length;
     const cites = active.flatMap((c) => c.citations).filter((r) => r.status !== 'not_checked');
@@ -145,8 +186,17 @@ export class ClaimLedger {
       citationsFailed: cites.filter(isFailure).length,
       verdicts: { ...this.verdicts },
     };
+    return stats;
+  }
+
+  closeRound(round: number): RoundStats {
+    const stats = this.stats(round);
     this.rounds.push(stats);
     return stats;
+  }
+
+  closeReview(round: number): RoundStats {
+    return this.resolution = this.stats(round);
   }
 
   /**
@@ -197,6 +247,7 @@ export class ClaimLedger {
       seats: this.seats,
       verdicts: this.verdicts,
       rounds: this.rounds,
+      ...(this.resolution ? { resolution: this.resolution } : {}),
       concessions: this.concessions,
       claims: [...this.claims.values()].map((c) => ({ ...c, status: this.status(c) })),
     };

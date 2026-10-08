@@ -44,21 +44,21 @@ export function renderDebateTurn(t: DebateTurn, seat: string): string {
   return out.join('\n');
 }
 
-function roundsTable(rounds: RoundStats[]): string[] {
-  const seats = Object.keys(rounds[rounds.length - 1]?.verdicts ?? {});
+function roundsTable(rounds: RoundStats[], resolution?: RoundStats): string[] {
+  const seats = Object.keys((resolution ?? rounds[rounds.length - 1])?.verdicts ?? {});
   return [
     `| round | claims | agreed | partial | disputed | open | withdrawn | citations failed | ${seats.map((s) => `verdict ${s}`).join(' | ')} |`,
     `|---|---|---|---|---|---|---|---|${seats.map(() => '---').join('|')}|`,
-    ...rounds.map((r) => `| ${r.round} | ${r.claims} | ${r.agreed} | ${r.partial} | ${r.disputed} | ${r.unaddressed} | ${r.withdrawn} | ${r.citationsFailed}/${r.citationsChecked} | ${seats.map((s) => r.verdicts[s] ?? '').join(' | ')} |`),
+    ...[...rounds, ...(resolution ? [resolution] : [])].map((r) => `| ${r === resolution ? 'Ledger review' : r.round} | ${r.claims} | ${r.agreed} | ${r.partial} | ${r.disputed} | ${r.unaddressed} | ${r.withdrawn} | ${r.citationsFailed}/${r.citationsChecked} | ${seats.map((s) => r.verdicts[s] ?? '').join(' | ')} |`),
   ];
 }
 
 export function debateReport(meta: RunMeta, ledger: ClaimLedger, latest: Record<string, DebateTurn>, names: Record<string, string>, stop: string): string {
-  const last = ledger.rounds[ledger.rounds.length - 1];
+  const last = ledger.resolution ?? ledger.rounds[ledger.rounds.length - 1];
   const out: string[] = [
     `# Debate: ${meta.title}`,
     '',
-    `**Outcome:** ${stop} · ${ledger.rounds.length} round(s) · ${last ? `${last.agreed} agreed, ${last.partial} partial, ${last.disputed} disputed, ${last.unaddressed} unaddressed of ${last.claims} claims` : 'no claims'}`,
+    `**Outcome:** ${stop} · ${ledger.rounds.length} round(s) · ${last ? `${last.agreed} agreed, ${last.partial} partial, ${last.disputed} disputed${last.unaddressed ? `, ${last.unaddressed} unaddressed` : ''} of ${last.claims} claims` : 'no claims'}`,
     '',
     '## Final positions',
   ];
@@ -89,7 +89,7 @@ export function debateReport(meta: RunMeta, ledger: ClaimLedger, latest: Record<
     for (const f of flips) out.push(`- R${f.round}: ${names[f.seat] ?? f.seat} on \`${f.claim}\`: ${f.from} → ${f.to}`);
     for (const c of ledger.concessions) out.push(`- R${c.round} ${names[c.seat] ?? c.seat} conceded: ${c.text}`);
   }
-  out.push('', '## Rounds', '', ...roundsTable(ledger.rounds));
+  out.push('', '## Rounds', '', ...roundsTable(ledger.rounds, ledger.resolution));
   return out.join('\n');
 }
 
@@ -195,7 +195,7 @@ export function usageSection(meta: RunMeta): string {
     s.usd += t.usd ?? 0;
     bySeat.set(t.seat, s);
   }
-  const specs = Object.fromEntries(meta.seats.map((s) => [s.role === 'chair' ? 'chair' : s.id, s.spec]));
+  const specs = Object.fromEntries(meta.seats.map((s) => [s.role === 'chair' && !s.customRole ? 'chair' : s.id, s.spec]));
   const out = ['## Usage', '', '| seat | spec | turns | time | input (cached) | output (reasoning) | cost |', '|---|---|---|---|---|---|---|'];
   for (const [seat, s] of [...bySeat].sort(([a], [b]) => (a === 'chair' ? 1 : b === 'chair' ? -1 : a.localeCompare(b)))) {
     out.push(`| ${seat} | \`${specs[seat] ?? ''}\` | ${s.turns} | ${(s.ms / 1000).toFixed(0)}s | ${kfmt(s.input)} (${kfmt(s.cached)}) | ${kfmt(s.output)} (${kfmt(s.reasoning)}) | ${s.credits ? s.credits.toFixed(2) + ' cr' : ''}${s.usd ? ' ~$' + s.usd.toFixed(3) : ''} |`);
@@ -210,7 +210,7 @@ export function usageSection(meta: RunMeta): string {
 }
 
 export function traceTable(meta: RunMeta): string {
-  const specs = Object.fromEntries(meta.seats.map((s) => [s.role === 'chair' ? 'chair' : s.id, `${s.engine}:${s.model}@${s.effort ?? '-'}`]));
+  const specs = Object.fromEntries(meta.seats.map((s) => [s.role === 'chair' && !s.customRole ? 'chair' : s.id, `${s.engine}:${s.model}@${s.effort ?? '-'}`]));
   const rows = meta.turns.map((t) => [
     String(t.n), `R${t.round}`, t.seat, specs[t.seat] ?? '', t.kind, `${(t.durationMs / 1000).toFixed(0)}s`,
     kfmt(t.usage.input), kfmt(t.usage.cached), kfmt(t.usage.output), kfmt(t.usage.reasoning),
@@ -291,7 +291,7 @@ table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}td,th{bo
 </style></head><body>
 <h1>${esc(meta.title)}</h1>
 <p class="meta">${esc(meta.id)} · ${esc(meta.protocol)} · ${esc(meta.status)} · ${esc(meta.createdAt)} · cwd <code>${esc(meta.cwd)}</code>${meta.git?.head ? ` · git <code>${esc(meta.git.head.slice(0, 10))}${meta.git.dirty ? '+dirty' : ''}</code>` : ''}</p>
-<p class="meta">${meta.seats.map((s) => `${esc(s.role === 'chair' ? 'chair' : s.id)}=<code>${esc(s.spec)}</code>`).join(' · ')} · codex ${esc(meta.versions.codex ?? '')} · claude ${esc(meta.versions.claude ?? '')}</p>
+<p class="meta">${meta.seats.map((s) => `${esc(s.role === 'chair' && !s.customRole ? 'chair' : s.id)}=<code>${esc(s.spec)}</code>`).join(' · ')} · codex ${esc(meta.versions.codex ?? '')} · claude ${esc(meta.versions.claude ?? '')}</p>
 <h2>Brief</h2><pre>${esc(meta.prompt)}</pre>
 ${mdToHtml(report)}
 <h2>Turns</h2>

@@ -17,7 +17,7 @@ import {
 
 // ── quota ────────────────────────────────────────────────────────────────
 
-function Meter({ w, warn }: { w: QuotaWindow; warn: number }) {
+function Meter({ w, warn }: { w: QuotaWindow; warn: number; }) {
   const reset = w.resetsAt * 1000 < Date.now();
   const pct = reset ? 0 : Math.min(100, w.usedPercent);
   const tone = reset ? 'idle' : pct >= warn ? 'bad' : pct >= warn - 20 ? 'warn' : 'good';
@@ -110,9 +110,9 @@ function TopBar() {
 
 // ── sidebar ──────────────────────────────────────────────────────────────
 
-type Item = { kind: 'chat'; at: string; c: ChatSummary } | { kind: 'run'; at: string; r: RunSummary };
+type Item = { kind: 'chat'; at: string; c: ChatSummary; } | { kind: 'run'; at: string; r: RunSummary; };
 
-function ItemMenu({ item }: { item: Item }) {
+function ItemMenu({ item }: { item: Item; }) {
   return (
     <Dropdown align="right" class="side-more" trigger={(_o, toggle) => <button type="button" class="icon-btn tiny" title="More" onClick={(e) => { e.stopPropagation(); toggle(); }}><Icon name="dots" size={14} /></button>}>
       {(close) => item.kind === 'chat' ? (
@@ -131,7 +131,7 @@ function ItemMenu({ item }: { item: Item }) {
   );
 }
 
-function SideItem({ item }: { item: Item }) {
+function SideItem({ item }: { item: Item; }) {
   const v = view.value;
   if (item.kind === 'chat') {
     const c = item.c;
@@ -206,7 +206,7 @@ function Sidebar() {
           </Dropdown>
         </div>
         <div class="mode-links">
-          {(['pair', 'debate', 'review', 'council', 'ask'] as Protocol[]).map((p) => (
+          {(['pair', 'debate', 'review', 'council', 'ask', 'custom'] as Protocol[]).map((p) => (
             <button type="button" class={`mode-link ${view.value.kind === 'new-run' && (view.value.draft?.protocol ?? 'pair') === p ? 'on' : ''}`} onClick={() => go({ kind: 'new-run', draft: { protocol: p } })} title={PROTOCOLS[p].help}>
               <Icon name={PROTOCOLS[p].icon} size={15} /> {PROTOCOLS[p].label}
             </button>
@@ -241,7 +241,7 @@ function Sidebar() {
 
 type HomeTarget = 'claude' | 'codex' | 'both' | Protocol;
 
-const HOME_TARGETS: { id: HomeTarget; label: string; icon?: string; engine?: 'claude' | 'codex' }[] = [
+const HOME_TARGETS: { id: HomeTarget; label: string; icon?: string; engine?: 'claude' | 'codex'; }[] = [
   { id: 'claude', label: 'Claude', engine: 'claude' },
   { id: 'codex', label: 'Codex', engine: 'codex' },
   { id: 'both', label: 'Both', icon: 'split' },
@@ -478,7 +478,7 @@ function RightPanel() {
 
 // ── modals ───────────────────────────────────────────────────────────────
 
-function FolderPicker({ start, onPick }: { start?: string; onPick: (p: string) => void }) {
+function FolderPicker({ start, onPick }: { start?: string; onPick: (p: string) => void; }) {
   const [path, setPath] = useState(start || app.value!.home);
   const [hidden, setHidden] = useState(false);
   const [l, setL] = useState<any>(null);
@@ -535,7 +535,7 @@ function SetupCheck() {
   );
 }
 
-function Settings({ tab: initial }: { tab?: 'general' | 'presets' | 'setup' | 'about' }) {
+function Settings({ tab: initial }: { tab?: 'general' | 'presets' | 'setup' | 'about'; }) {
   const s = app.value!;
   const [tab, setTab] = useState<'general' | 'presets' | 'setup' | 'about'>(initial ?? 'general');
   const [gui, setGui] = useState<AppState['gui']>(structuredClone(s.gui));
@@ -641,7 +641,7 @@ function Shortcuts() {
   );
 }
 
-function Confirm({ m }: { m: Extract<NonNullable<typeof modal.value>, { kind: 'confirm' }> }) {
+function Confirm({ m }: { m: Extract<NonNullable<typeof modal.value>, { kind: 'confirm'; }>; }) {
   const close = () => (modal.value = null);
   return (
     <Modal title={m.title} onClose={close} footer={<>
@@ -671,7 +671,7 @@ function commands(): Command[] {
     { id: 'new-claude', label: 'New Claude chat', icon: 'chat', engine: 'claude', hint: `${MOD} N`, run: () => void openNewChat('claude') },
     { id: 'new-codex', label: 'New Codex chat', icon: 'chat', engine: 'codex', run: () => void openNewChat('codex') },
     { id: 'split', label: 'Side by side: Claude and Codex', icon: 'split', hint: `${MOD} Shift N`, run: () => void openSideBySide() },
-    ...(['pair', 'debate', 'review', 'council', 'ask'] as Protocol[]).map((p) => ({ id: `run-${p}`, label: `New ${PROTOCOLS[p].label.toLowerCase()} run`, icon: PROTOCOLS[p].icon, run: () => go({ kind: 'new-run', draft: { protocol: p } }) })),
+    ...(['pair', 'debate', 'review', 'council', 'ask', 'custom'] as Protocol[]).map((p) => ({ id: `run-${p}`, label: `New ${PROTOCOLS[p].label.toLowerCase()} run`, icon: PROTOCOLS[p].icon, run: () => go({ kind: 'new-run', draft: { protocol: p } }) })),
     { id: 'home', label: 'Go home', icon: 'home', run: () => go({ kind: 'home' }) },
     { id: 'folder', label: 'Open a project folder…', icon: 'folder', run: () => pickFolder(project.value || s.home, setProject) },
     { id: 'no-folder', label: 'Work without a project folder', icon: 'folder-off', run: () => setProject('') },

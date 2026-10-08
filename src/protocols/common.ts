@@ -12,12 +12,12 @@ import { formatSeat, seatLabel, type Seat } from '../seats.ts';
 import { RunStore, type QuotaSnapshot, type RunMeta, type TurnRecord } from '../store.ts';
 
 export type RunEvent =
-  | { kind: 'log'; text: string }
-  | { kind: 'turn_start'; seat: string; n: number; round: number; turnKind: string }
-  | { kind: 'live'; seat: string; n: number; round: number; turnKind: string; blocks: Block[] }
-  | { kind: 'turn'; seat: string; n: number; label: string; round: number; turnKind: string; durationMs: number; verdict?: string; error?: string; hint?: string; note?: string }
-  | { kind: 'round'; round: number; stats: unknown }
-  | { kind: 'done'; status: string; outcome: Record<string, unknown> };
+  | { kind: 'log'; text: string; }
+  | { kind: 'turn_start'; seat: string; n: number; round: number; turnKind: string; }
+  | { kind: 'live'; seat: string; n: number; round: number; turnKind: string; blocks: Block[]; }
+  | { kind: 'turn'; seat: string; n: number; label: string; round: number; turnKind: string; durationMs: number; verdict?: string; error?: string; hint?: string; note?: string; }
+  | { kind: 'round'; round: number; stats: unknown; }
+  | { kind: 'done'; status: string; outcome: Record<string, unknown>; };
 
 export interface RunOptions {
   protocol: string;
@@ -34,7 +34,7 @@ export interface RunOptions {
   /** False for a question with no project folder (the seats get an empty scratch folder). */
   workspace?: boolean;
   /** Live progress for the GUI; receives every event with the run id. */
-  sink?: (e: RunEvent & { run: string }) => void;
+  sink?: (e: RunEvent & { run: string; }) => void;
 }
 
 /** Thrown inside a protocol when the run was cancelled or cannot usefully continue. */
@@ -77,8 +77,17 @@ export class RunContext {
   private readonly started = Date.now();
   /** Seats a protocol cannot do without; when fewer still work, the run stops early. */
   minSeats = 1;
+  /** Shared turn budget for templates, including recovery attempts and concurrent sends. */
+  turnLimit?: number;
+  private attempts = 0;
+  get sentTurns(): number { return this.attempts; }
+  private canSend(): boolean { return this.turnLimit === undefined || this.attempts < this.turnLimit; }
+  private countSend(): void {
+    if (!this.canSend()) throw new Error('model turn limit reached');
+    this.attempts++;
+  }
   private readonly failedSeats = new Map<string, string>();
-  private abortReason?: { status: 'cancelled' | 'failed'; reason: string };
+  private abortReason?: { status: 'cancelled' | 'failed'; reason: string; };
   private abortWaiters: (() => void)[] = [];
   private finished = false;
 
@@ -127,7 +136,7 @@ export class RunContext {
 
   emit(e: RunEvent): void {
     try {
-      this.opts.sink?.({ ...e, run: this.store.meta.id } as RunEvent & { run: string });
+      this.opts.sink?.({ ...e, run: this.store.meta.id } as RunEvent & { run: string; });
     } catch {
       /* a GUI listener must never break a run */
     }
@@ -188,7 +197,7 @@ export class RunContext {
     this.failedSeats.set(ss.seat.id, t.error ?? 'failed');
     const live = this.opts.seats.filter((s) => !this.failedSeats.has(s.id)).length;
     const hint = errorHint(t.error);
-    if (ss.record.role === 'chair') return;
+    if (ss.record.role === 'chair' && !ss.record.customRole) return;
     if (live < this.minSeats) this.abort('failed', `${seatName} failed: ${t.error}${hint ? ` — ${hint}` : ''}`);
   }
 
@@ -202,6 +211,7 @@ export class RunContext {
    */
   async send(ss: SeatSession, message: string, o: SendOpts, check?: (t: TurnRecord) => string | boolean | undefined): Promise<TurnRecord> {
     this.checkpoint();
+    this.countSend();
     const t = await this.engines.send(ss, message, o);
     if (this.aborted) return t;
     const cls = classifyError(t.error);
@@ -211,9 +221,11 @@ export class RunContext {
     }
     if (cls === 'timeout' || cls === 'aborted') return t;
     if (cls === 'capacity' || cls === 'dead_session') {
+      if (!this.canSend()) return t;
       this.log(`${ss.seat.id} ${o.kind}: ${t.error!.slice(0, 160)}; retrying in 30s`);
       await this.sleep(30_000);
       this.checkpoint();
+      this.countSend();
       const again = await this.engines.send(ss, message, { ...o, kind: `${o.kind}-retry` });
       const c2 = classifyError(again.error);
       if (c2 === 'fatal' || c2 === 'quota' || c2 === 'capacity') this.seatFailed(ss, again);
@@ -221,19 +233,20 @@ export class RunContext {
     }
     const verdict = check?.(t);
     const problem = t.error ?? (typeof verdict === 'string' ? verdict : verdict === false ? (t.parseError ?? 'it did not match the required format') : undefined);
-    if (!problem) return t;
+    if (!problem || !this.canSend()) return t;
     this.log(`${ss.seat.id} ${o.kind}: ${problem.slice(0, 160)}; retrying once`);
     const note = `Your previous reply could not be used: ${problem.slice(0, 400)}. Reply again to the message above, following its instructions and the required format exactly.`;
     this.checkpoint();
+    this.countSend();
     return this.engines.send(ss, note, { ...o, kind: `${o.kind}-retry` });
   }
 
   recordSeats(sessions: SeatSession[]): void {
     const byId = new Map(sessions.map((s) => [s.record.id + s.record.role, s.record]));
     this.store.meta.seats = [
-      ...this.store.meta.seats.filter((s) => !byId.has(s.id + s.role)),
+      ...this.store.meta.seats.filter((s) => !byId.has(s.id + s.role) && (s.clawSession || !sessions.some((ss) => ss.seat.id === s.id))),
       ...sessions.map((s) => s.record),
-    ].sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.id.localeCompare(b.id));
+    ].sort((a, b) => (ROLE_ORDER[a.role] ?? 1) - (ROLE_ORDER[b.role] ?? 1) || a.id.localeCompare(b.id));
     this.store.save();
   }
 

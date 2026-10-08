@@ -42,7 +42,8 @@ export interface SeatRecord {
   model: string;
   effort?: string;
   name?: string;
-  role: 'participant' | 'chair' | 'reviewer' | 'writer';
+  role: string;
+  customRole?: boolean;
   clawSession: string;
   codexThreadId?: string;
   claudeSessionId?: string;
@@ -58,11 +59,13 @@ export interface QuotaWindow {
 }
 
 export interface QuotaSnapshot {
-  codex?: { windows: QuotaWindow[]; plan?: string; asOf: number; limitReached?: string | null };
-  claude?: { windows: QuotaWindow[]; status?: string; asOf: number };
+  codex?: { windows: QuotaWindow[]; plan?: string; asOf: number; limitReached?: string | null; };
+  claude?: { windows: QuotaWindow[]; status?: string; asOf: number; };
 }
 
 export interface TurnRecord {
+  /** Exact workflow node, so continuation can replay its configured validation policy. */
+  templateStep?: string;
   n: number;
   round: number;
   seat: string;
@@ -97,11 +100,11 @@ export interface RunMeta {
   seats: SeatRecord[];
   options: Record<string, unknown>;
   versions: Record<string, string>;
-  git?: { head?: string; branch?: string; dirty?: boolean };
+  git?: { head?: string; branch?: string; dirty?: boolean; };
   turns: Omit<TurnRecord, 'reply' | 'structured' | 'thinking' | 'tools'>[];
   outcome?: Record<string, unknown>;
-  quota?: { before?: QuotaSnapshot; after?: QuotaSnapshot };
-  totals?: Usage & { codexCredits: number; usd: number; durationMs: number; turns: number };
+  quota?: { before?: QuotaSnapshot; after?: QuotaSnapshot; };
+  totals?: Usage & { codexCredits: number; usd: number; durationMs: number; turns: number; };
   error?: string;
   continuedFrom?: string;
   /** Pair runs: where the writer works, and what became of it (applied, kept, discarded). */

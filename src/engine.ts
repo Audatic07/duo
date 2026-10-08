@@ -29,8 +29,8 @@ import { ClaudeTranslator, CodexTranslator, type Block } from './live.ts';
 
 /** What a seat may do in the workspace. Discussion seats read; a pair-mode writer writes. */
 export type SeatAccess =
-  | { kind: 'read' }
-  | { kind: 'write'; codexSandbox: 'workspace-write' | 'danger-full-access'; network?: boolean; claudeMode: 'acceptEdits' | 'bypassPermissions'; claudeSandbox?: boolean };
+  | { kind: 'read'; }
+  | { kind: 'write'; codexSandbox: 'workspace-write' | 'danger-full-access'; network?: boolean; claudeMode: 'acceptEdits' | 'bypassPermissions'; claudeSandbox?: boolean; };
 
 export interface SeatSession {
   seat: Seat;
@@ -45,7 +45,7 @@ export interface SeatSession {
   /** Starts the claw session again, resuming the thread/session (after a crash). */
   restart: () => Promise<void>;
   /** Live translation of the turn in flight, for the GUI. */
-  live?: { n: number; round: number; kind: string; translator: ClaudeTranslator | CodexTranslator; pending: Set<Block>; timer?: ReturnType<typeof setTimeout> };
+  live?: { n: number; round: number; kind: string; translator: ClaudeTranslator | CodexTranslator; pending: Set<Block>; timer?: ReturnType<typeof setTimeout>; };
   codexRouteName?: string;
   claudeSinkId?: string;
 }
@@ -54,6 +54,9 @@ export interface SendOpts {
   round: number;
   kind: string;
   timeoutSec?: number;
+  /** Dynamic inputs available to an editable operation prompt; never persisted as model output. */
+  templateContext?: Record<string, unknown>;
+  templateStep?: string;
 }
 
 export interface LiveUpdate {
@@ -77,12 +80,12 @@ export class Engines {
   private readonly runTag: string;
   private readonly run: RunStore;
   private readonly cfg: Config;
-  private readonly bins: { codex: BinSpec; claude: BinSpec };
+  private readonly bins: { codex: BinSpec; claude: BinSpec; };
   private readonly sessions = new Set<SeatSession>();
   private readonly hooks: EngineHooks;
   private stopped = false;
 
-  constructor(run: RunStore, cfg: Config, bins: { codex: BinSpec; claude: BinSpec }, hooks: EngineHooks = {}) {
+  constructor(run: RunStore, cfg: Config, bins: { codex: BinSpec; claude: BinSpec; }, hooks: EngineHooks = {}) {
     this.run = run;
     this.cfg = cfg;
     this.bins = bins;
@@ -110,6 +113,7 @@ export class Engines {
     role: SeatRecord['role'],
     opts: {
       schema?: object;
+      sessionKey?: string;
       system: string;
       cwd: string;
       access?: SeatAccess;
@@ -119,7 +123,7 @@ export class Engines {
     },
   ): Promise<SeatSession> {
     const access = opts.access ?? { kind: 'read' };
-    const suffix = role === 'chair' ? 'chair' : role === 'reviewer' ? `${seat.id}-rev` : seat.id;
+    const suffix = opts.sessionKey ?? (role === 'chair' ? 'chair' : role === 'reviewer' ? `${seat.id}-rev` : seat.id);
     const clawName = `duo-${this.runTag}-${suffix}`;
     const jsonSchema = opts.schema ? JSON.stringify(opts.schema) : undefined;
     const record: SeatRecord = {
@@ -130,6 +134,7 @@ export class Engines {
       effort: seat.effort,
       name: seat.name,
       role,
+      ...(opts.sessionKey ? { customRole: true } : {}),
       clawSession: clawName,
       codexThreadId: opts.resume?.codexThreadId,
       claudeSessionId: opts.resume?.claudeSessionId,
@@ -243,13 +248,13 @@ export class Engines {
     if (!live.pending.size) return;
     const blocks = [...live.pending].map((b) => ({ ...b }));
     live.pending.clear();
-    this.hooks.onLive?.({ seat: ss.record.role === 'chair' ? 'chair' : ss.seat.id, n: live.n, round: live.round, kind: live.kind, blocks });
+    this.hooks.onLive?.({ seat: ss.record.role === 'chair' && !ss.record.customRole ? 'chair' : ss.seat.id, n: live.n, round: live.round, kind: live.kind, blocks });
   }
 
   /** One turn: send, then rebuild the full record from the raw stream. */
   async send(ss: SeatSession, message: string, o: SendOpts): Promise<TurnRecord> {
     const n = this.run.allocTurn();
-    const seatKey = ss.record.role === 'chair' ? 'chair' : ss.seat.id;
+    const seatKey = ss.record.role === 'chair' && !ss.record.customRole ? 'chair' : ss.seat.id;
     const dir = this.run.turnDir(n, seatKey, o.round, o.kind);
     const startedAt = new Date();
     const started = Date.now();
@@ -258,7 +263,7 @@ export class Engines {
     ss.live = { n, round: o.round, kind: o.kind, translator: ss.seat.engine === 'claude' ? new ClaudeTranslator() : new CodexTranslator(), pending: new Set() };
     this.hooks.onTurnStart?.(seatKey, n, o.round, o.kind);
 
-    const attempt = async (): Promise<{ output: string; error?: string; sessionId?: string }> => {
+    const attempt = async (): Promise<{ output: string; error?: string; sessionId?: string; }> => {
       try {
         const res = await this.manager.sendMessage(ss.clawName, message, { timeout: timeoutSec * 1000, parentRunId: this.run.meta.id, nodeKind: o.kind });
         return { output: res.output ?? '', error: res.error, sessionId: res.sessionId };
@@ -334,6 +339,7 @@ export class Engines {
       usd,
       rateLimits: parsed.rateLimits,
       verdict: typeof (structured as any)?.verdict === 'string' ? (structured as any).verdict : undefined,
+      ...(o.templateStep ? { templateStep: o.templateStep } : {}),
       error: parsed.error || transportError || (!reply ? (this.stopped ? 'duo: run cancelled' : 'empty reply') : undefined),
       warnings: parsed.warnings.length ? parsed.warnings : undefined,
     };
@@ -354,6 +360,14 @@ export class Engines {
       output: Math.max(0, u.output - prev.output),
       reasoning: Math.max(0, u.reasoning - prev.reasoning),
     };
+  }
+
+  /** Retire a finished custom session before opening its next fresh role context. */
+  async retire(ss: SeatSession): Promise<void> {
+    await this.manager.stopSession(ss.clawName).catch(() => undefined);
+    if (ss.codexRouteName) dropCodexRoute(ss.codexRouteName);
+    if (ss.claudeSinkId) claudeSink(ss.claudeSinkId, undefined);
+    this.sessions.delete(ss);
   }
 
   /** Stop every seat now (cancel, or a fatal failure that makes the run pointless). */

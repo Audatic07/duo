@@ -49,8 +49,8 @@ export const MODES: Record<ModeId, ModeInfo> = {
     label: 'Debate',
     icon: 'debate',
     protocol: 'debate',
-    tagline: 'Blind answers, then cross-examination over a claim ledger until every claim is agreed.',
-    steps: ['Both answer blind', 'Claims go on the ledger', 'Each takes a stance on the other’s claims', 'Someone concedes', 'Converged: every claim agreed'],
+    tagline: 'Blind answers, cross-examination, then a final ledger review with agreement or disagreement on every claim.',
+    steps: ['Both answer blind', 'Claims go on the ledger', 'Each takes a stance on the other’s claims', 'Someone concedes', 'Final ledger review: every claim gets a decision'],
   },
   review: {
     id: 'review',
@@ -237,7 +237,7 @@ function DebateDemo({ size, caption }: { size: 'card' | 'large'; caption?: boole
             <EngineMark engine="claude" size={18} />
             <div class={`d-card${on(s >= 0)}`}><Lines n={2} widths={[70, 90]} /></div>
           </div>
-          <div class={`d-done${on(s >= 4)}`}><Icon name="check-circle" size={14} /> Converged in round 3</div>
+          <div class={`d-done${on(s >= 4)}`}><Icon name="check-circle" size={14} /> Final ledger review: all agree</div>
         </div>
       </Captioned>
     </div>
