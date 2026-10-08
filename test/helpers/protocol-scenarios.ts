@@ -1,7 +1,7 @@
 /** Deterministic scripted conversations used to freeze the legacy protocols' observable behavior. */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RunContext } from '../../src/protocols/common.ts';
 import { parseSeat } from '../../src/seats.ts';
@@ -13,6 +13,18 @@ export const SCENARIOS = ['ask-one', 'ask-chair', 'debate-converged', 'debate-st
 export type Scenario = (typeof SCENARIOS)[number];
 type Protocols = { ask: Function; review: Function; council: Function; debate: Function; pair: Function; };
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
+/** Normalize strings before JSON encoding, which escapes Windows path separators. */
+export function normalizeSnapshot(value: unknown, roots: string[], nodePath = process.execPath): unknown {
+  const compact = (v: any): any => {
+    if (Array.isArray(v)) return v.map(compact);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => k === 'schema' ? ['schemaHash', createHash('sha256').update(JSON.stringify(x)).digest('hex')] : [k, compact(x)]));
+    if (typeof v !== 'string') return v;
+    let text = v;
+    for (const root of roots) text = text.split(root).join('$ROOT');
+    return text.split(nodePath).join('$NODE').replace(/\$ROOT(?:[\\/][\w.-]+)+/g, (path) => path.replaceAll('\\', '/'));
+  };
+  return JSON.parse(JSON.stringify(compact(value)).replace(/\b[a-f0-9]{40}\b/g, '$COMMIT').replace(/from `[a-f0-9]{7,10}`/g, 'from `$COMMIT`').replace(/duo\/([\w-]+)-[a-z0-9]{5}(?=`)/g, 'duo/$1-$SALT').replace(/"durationMs":\d+/g, '"durationMs":0'));
+}
 function instance(schema: any): any {
   const type = Array.isArray(schema.type) ? schema.type.find((x: string) => x !== 'null') : schema.type;
   if (schema.enum) return schema.enum[0];
@@ -27,6 +39,7 @@ export async function runScenario(scenario: Scenario, root: string, protocols: P
   const cwd = join(root, 'project'); mkdirSync(cwd, { recursive: true });
   if (!existsSync(join(cwd, '.git'))) {
     execFileSync('git', ['init', '-q', cwd]);
+    execFileSync('git', ['-C', cwd, 'config', 'core.autocrlf', 'false']);
     writeFileSync(join(cwd, 'README.md'), 'first line\nsecond line\n');
     execFileSync('git', ['-C', cwd, 'add', '.']);
     execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']);
@@ -110,16 +123,6 @@ export async function runScenario(scenario: Scenario, root: string, protocols: P
   else report = await protocols[mode](ctx as RunContext);
   if (meta.workspace) finishWorkspace(meta.workspace, 'discard', scenario);
   // Paths, commit hashes and command timing are environmental, not protocol behavior.
-  const compact = (v: any): any => {
-    if (Array.isArray(v)) return v.map(compact);
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => k === 'schema' ? ['schemaHash', createHash('sha256').update(JSON.stringify(x)).digest('hex')] : [k, compact(x)]));
-    return v;
-  };
-  const normalize = (v: unknown) => {
-    if (typeof v === 'number') return v;
-    const str = JSON.stringify(compact(v)).split(root).join('$ROOT').split(process.execPath).join('$NODE').replace(/\b[a-f0-9]{40}\b/g, '$COMMIT').replace(/from `[a-f0-9]{7,10}`/g, 'from `$COMMIT`').replace(/duo\/([\w-]+)-[a-z0-9]{5}(?=`)/g, 'duo/$1-$SALT').replace(/"durationMs":\d+/g, '"durationMs":0');
-    return JSON.parse(str);
-  };
   const artifacts = Object.fromEntries(Object.entries(files).filter(([k]) => ['ledger.json', 'findings.json', 'council.json', 'pair.json'].includes(k)).map(([k, v]) => [k, JSON.parse(v)]));
-  return normalize({ opens, prompts, status: meta.status, outcome: meta.outcome, report, artifacts });
+  return normalizeSnapshot({ opens, prompts, status: meta.status, outcome: meta.outcome, report, artifacts }, [root, realpathSync.native(root)]);
 }

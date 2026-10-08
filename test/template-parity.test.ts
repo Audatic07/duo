@@ -6,7 +6,7 @@ import { after, test } from 'node:test';
 
 const tmp = mkdtempSync(join(tmpdir(), 'duo-parity-'));
 process.env.DUO_HOME = join(tmp, 'data'); process.env.DUO_CONFIG = join(tmp, 'config.json');
-const { runScenario, SCENARIOS } = await import('./helpers/protocol-scenarios.ts');
+const { normalizeSnapshot, runScenario, SCENARIOS } = await import('./helpers/protocol-scenarios.ts');
 const { ask } = await import('../src/protocols/ask.ts');
 const { debate } = await import('../src/protocols/debate.ts');
 const { review } = await import('../src/protocols/review.ts');
@@ -15,6 +15,20 @@ const { pair } = await import('../src/protocols/pair.ts');
 const expected = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures/templates/legacy-protocols.json'), 'utf8'));
 const debates = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures/templates/debate-ledger-review.json'), 'utf8'));
 after(() => rmSync(tmp, { recursive: true, force: true }));
+test('protocol snapshots normalize Windows paths and native aliases without changing other backslashes', () => {
+  const short = 'C:\\Users\\RUNNER~1\\Temp\\duo-parity';
+  const native = 'C:\\Users\\runneradmin\\Temp\\duo-parity';
+  const node = 'C:\\Program Files\\nodejs\\node.exe';
+  assert.deepEqual(normalizeSnapshot({
+    cwd: `${short}\\project`,
+    report: `Workspace: \`${native}\\data\\worktrees\\legacy-run\``,
+    command: `"${node}" -e "process.exit(0)"`,
+    prompt: `Read ${short}\\project. Preserve the literal \\n.`,
+  }, [short, native], node), {
+    cwd: '$ROOT/project', report: 'Workspace: `$ROOT/data/worktrees/legacy-run`',
+    command: '"$NODE" -e "process.exit(0)"', prompt: 'Read $ROOT/project. Preserve the literal \\n.',
+  });
+});
 for (const scenario of SCENARIOS) test(`protocol snapshot: ${scenario} preserves every system prompt, turn, outcome and domain artifact`, async () => {
   assert.deepEqual(await runScenario(scenario, tmp, { ask, debate, review, council, pair }), scenario.startsWith('debate-') ? debates[scenario] : expected[scenario]);
 });
