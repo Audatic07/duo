@@ -21,6 +21,7 @@ const MAX_OUT = 20_000;
 const clip = (s: string) => (s.length > MAX_OUT ? s.slice(0, MAX_OUT) + `\n…[${s.length - MAX_OUT} more chars in the trace]` : s);
 
 export interface TurnFacts {
+  completed?: boolean;
   usage?: { input: number; cached: number; output: number; reasoning: number };
   costUsd?: number;
   threadId?: string;
@@ -130,7 +131,8 @@ export class ClaudeTranslator extends Translator {
           reasoning: 0,
         };
         this.facts.costUsd = ev.total_cost_usd;
-        if (ev.is_error || (ev.subtype && ev.subtype !== 'success')) this.facts.error = String(ev.result || ev.subtype || 'error');
+        this.facts.completed = !ev.is_error && (!ev.subtype || ev.subtype === 'success');
+        this.facts.error = this.facts.completed ? undefined : String(ev.result || ev.subtype || 'error');
         for (const b of this.blocks) if (b.status === 'running') { b.status = 'done'; changed.add(b); }
         return;
       }
@@ -145,6 +147,7 @@ export class CodexTranslator extends Translator {
         this.facts.threadId = ev.thread_id;
         return;
       case 'turn.completed': {
+        this.facts.completed = true;
         const u = ev.usage || {};
         this.facts.usage = { input: u.input_tokens ?? 0, cached: u.cached_input_tokens ?? 0, output: u.output_tokens ?? 0, reasoning: u.reasoning_output_tokens ?? 0 };
         // Errors on the way did not stop the turn.
@@ -153,6 +156,7 @@ export class CodexTranslator extends Translator {
       }
       case 'turn.failed':
       case 'error': {
+        if (ev.type === 'turn.failed') this.facts.completed = false;
         const msg = String(ev.error?.message ?? ev.message ?? 'error');
         // Codex announces its own reconnect attempts as errors and then carries on.
         const transient = ev.type === 'error' && classifyError(msg) === 'transient';

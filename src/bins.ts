@@ -3,7 +3,7 @@
  * sometimes Node plus a script (npm installs on Windows only provide .cmd wrappers, which cannot be
  * spawned without a shell).
  */
-import { execFileSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { execFile, execFileSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -122,6 +122,16 @@ export function resolveClaude(o: BinOverrides = {}): BinSpec {
 /** Run a CLI synchronously (version checks, model catalog, login status). */
 export function runBin(bin: BinSpec, args: string[], opts: SpawnSyncOptions = {}) {
   return spawnSync(bin.command, [...bin.args, ...args], { windowsHide: true, ...opts, env: { ...process.env, ...bin.env, ...(opts.env ?? {}) } });
+}
+
+/** Bounded CLI maintenance work without blocking the GUI server's event loop. */
+export function runBinAsync(bin: BinSpec, args: string[], timeout: number, signal?: AbortSignal): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(bin.command, [...bin.args, ...args], {
+      encoding: 'utf8', timeout, signal, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, ...bin.env },
+    }, (error, stdout, stderr) => resolve({ ok: !error, stdout, stderr, error: error?.message }));
+  });
 }
 
 export function binVersion(bin: BinSpec): string {

@@ -14,7 +14,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname, join } from 'node:path';
-import { binVersion, runBin } from '../bins.ts';
+import { binVersion, runBinAsync } from '../bins.ts';
 import { CLAUDE_MODELS, codexCatalog, loadConfig, resolveClaudeBin, resolveCodexBin, saveConfig } from '../config.ts';
 import { liveChecks, runDoctor } from '../doctor.ts';
 import { sanitizeEnvironment } from '../env.ts';
@@ -184,7 +184,8 @@ function state() {
   };
 }
 
-let claudeUpdate: Promise<{ ok: boolean; output: string; }> | undefined;
+let claudeUpdate: Promise<{ ok: boolean; output: string; version: string }> | undefined;
+const maintenanceAbort = new AbortController();
 
 type Handler = (m: RegExpMatchArray, req: IncomingMessage, url: URL, res: ServerResponse) => Promise<unknown> | unknown;
 const routes: [string, RegExp, Handler][] = [
@@ -202,13 +203,12 @@ const routes: [string, RegExp, Handler][] = [
     return url.searchParams.get('live') ? [...runDoctor(c), ...liveChecks(c)] : runDoctor(c);
   }],
   ['POST', /^\/api\/maintenance\/update-claude$/, async () => {
-    claudeUpdate ??= new Promise((resolve) => {
-      const r = runBin(bins.claude, ['update'], { encoding: 'utf8', timeout: 300_000 });
-      resolve({ ok: r.status === 0, output: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().slice(-4000) });
-    });
-    const out = await claudeUpdate;
-    claudeUpdate = undefined;
-    return { ...out, version: binVersion(bins.claude) };
+    claudeUpdate ??= (async () => {
+      const r = await runBinAsync(bins.claude, ['update'], 300_000, maintenanceAbort.signal);
+      const version = maintenanceAbort.signal.aborted ? undefined : await runBinAsync(bins.claude, ['--version'], 30_000, maintenanceAbort.signal);
+      return { ok: r.ok, output: (`${r.stdout}${r.stderr}`.trim() || r.error || '').slice(-4000), version: version?.ok ? version.stdout.trim() : 'unknown' };
+    })().finally(() => { claudeUpdate = undefined; });
+    return claudeUpdate;
   }],
   ['GET', /^\/api\/fs\/dirs$/, (_m, _r, url) => listDirs(url.searchParams.get('path') ?? undefined, url.searchParams.get('hidden') === '1')],
   ['GET', /^\/api\/fs\/workspace$/, (_m, _r, url) => workspaceOptions(url.searchParams.get('cwd') ?? '')],
@@ -336,6 +336,7 @@ async function shutdown(): Promise<void> {
   // A second signal, or sessions that will not stop, must not keep the process alive.
   if (closing) process.exit(0);
   closing = true;
+  maintenanceAbort.abort();
   setTimeout(() => process.exit(0), 4000).unref();
   server.close();
   await Promise.all([chats?.close(), runs?.close()]);

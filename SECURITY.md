@@ -5,7 +5,7 @@ Duo can make AI agents edit files and run commands on your computer, so its loca
 ## Model
 
 - The engine (`src/server/main.ts`) listens on `127.0.0.1` only.
-- Every API call needs a random token generated at each launch. The desktop shell passes it to its own window in the URL fragment; it is never written to disk or sent anywhere else.
+- Every API call needs a random token generated at each launch. The desktop shell passes it to its own window in the URL fragment. Claude chats that request GUI approvals also pass it to the local permission bridge through an MCP config file, restricted to owner access on POSIX systems and removed when the chat is deleted or Duo shuts down normally. A crash may leave a file containing an expired launch token; Windows relies on the user's data-folder ACLs.
 - Requests with a non-loopback `Host` header (DNS rebinding) or a cross-site `Origin` are refused.
 - Model output is rendered through DOMPurify; links open in the system browser; the page has a strict Content-Security-Policy.
 - The Electron window runs with `contextIsolation`, `sandbox` and no Node integration. The preload exposes four functions: pick a folder, show a folder, show a notification, and receive a navigation request.

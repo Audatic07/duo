@@ -62,11 +62,16 @@ export function gitState(cwd: string) {
   } catch {
     /* no commits yet */
   }
-  const files = git(cwd, ['status', '--porcelain=v1', '-z'])
-    .split('\0')
-    .filter(Boolean)
-    .filter((l) => /^[ MADRCU?!]{2} /.test(l))
-    .map((l) => ({ status: l.slice(0, 2).trim() || '?', path: l.slice(3) }));
+  const entries = git(cwd, ['status', '--porcelain=v1', '-z']).split('\0');
+  const files: { status: string; path: string }[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry) continue;
+    const status = entry.slice(0, 2);
+    files.push({ status: status.trim() || '?', path: entry.slice(3) });
+    // In -z output, renames/copies have a second NUL-delimited source path, with no status.
+    if (/[RC]/.test(status)) i++;
+  }
   let diff = '';
   try {
     diff = git(cwd, ['diff', '--no-color', '--no-ext-diff', 'HEAD']);

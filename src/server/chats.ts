@@ -5,7 +5,7 @@
  */
 import { SessionManager, nullLogger } from '@enderfga/claw-orchestrator';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BinSpec } from '../bins.ts';
 import type { Config } from '../config.ts';
@@ -98,6 +98,8 @@ export class ChatManager {
   private readonly drafts = new Set<string>();
   private readonly live = new Map<string, { clawName: string; key: string; route?: string }>();
   private readonly running = new Map<string, { turn: ChatTurn; stop: () => void }>();
+  private readonly pending = new Map<string, Promise<void>>();
+  private closing = false;
   private readonly current = new Map<string, LiveTurn>();
   private readonly bus: Bus;
   private readonly cfg: Config;
@@ -142,7 +144,7 @@ export class ChatManager {
   }
 
   private save(s: ChatSession): void {
-    if (this.drafts.has(s.id)) return;
+    if (this.sessions.get(s.id) !== s || this.drafts.has(s.id)) return;
     const path = join(CHATS_DIR, `${s.id}.json`);
     writeFileSync(path + '.tmp', JSON.stringify(s));
     renameSync(path + '.tmp', path);
@@ -212,26 +214,34 @@ export class ChatManager {
   }
 
   async remove(id: string): Promise<void> {
+    const s = this.get(id);
     this.running.get(id)?.stop();
-    const l = this.live.get(id);
-    if (l) {
-      await this.manager.stopSession(l.clawName).catch(() => undefined);
-      if (l.route) dropCodexRoute(l.route);
-    }
-    const s = this.sessions.get(id);
-    if (s?.claudeSessionId) claudeSink(s.claudeSessionId, undefined);
-    this.live.delete(id);
+    // Remove ownership before awaiting: a late turn must not save or advertise this chat again.
     this.sessions.delete(id);
     this.drafts.delete(id);
+    await this.pending.get(id);
+    await this.stopLive(id);
+    this.perms.cancelChat(id);
+    this.perms.forgetAllowed(id);
+    if (s.claudeSessionId) claudeSink(s.claudeSessionId, undefined);
     rmSync(join(CHATS_DIR, `${id}.json`), { force: true });
     rmSync(join(MCP_DIR, `${id}.json`), { force: true });
+    rmSync(join(TAPS_DIR, `${id}.jsonl`), { force: true });
     this.bus.emit({ t: 'chat_removed', id });
+  }
+
+  private async stopLive(id: string): Promise<void> {
+    const l = this.live.get(id);
+    if (!l) return;
+    this.live.delete(id);
+    if (l.route) dropCodexRoute(l.route);
+    await this.manager.stopSession(l.clawName).catch(() => undefined);
   }
 
   private mcpConfig(chat: string): string {
     const path = join(MCP_DIR, `${chat}.json`);
     const node = nodeRunner();
-    writeFileSync(path, JSON.stringify({
+    const config = JSON.stringify({
       mcpServers: {
         duo: {
           type: 'stdio',
@@ -240,12 +250,21 @@ export class ChatManager {
           env: { ...node.env, DUO_API_URL: this.api.url, DUO_API_TOKEN: this.api.token, DUO_CHAT_ID: chat },
         },
       },
-    }));
+    });
+    const fd = openSync(path, 'w', 0o600);
+    try {
+      // Also repair permissions on files created by earlier versions before writing the token.
+      fchmodSync(fd, 0o600);
+      writeFileSync(fd, config);
+    } finally {
+      closeSync(fd);
+    }
     return path;
   }
 
   /** Raw stream line from this chat's CLI: keep it for the trace and update the live view. */
   private onLine(chatId: string, line: string): void {
+    if (!this.sessions.has(chatId)) return;
     try {
       appendFileSync(join(TAPS_DIR, `${chatId}.jsonl`), line + '\n');
     } catch {
@@ -288,48 +307,56 @@ export class ChatManager {
     const seat = this.validate(s.engine, s.spec, s.access);
     const clawName = `gui-${s.id.slice(0, 8)}-${Date.now().toString(36)}`;
     let route: string | undefined;
-    if (seat.engine === 'codex') {
-      route = codexRoute(`chat-${s.id}-${Date.now().toString(36)}`, {
-        bin: this.bins.codex,
-        overrides: [...codexOverrides(seat), `shell_environment_policy.set={${DEPTH_VAR}="1"}`],
-        ignoreRules: false,
-        onLine: (line) => this.onLine(s.id, line),
-      });
-      await withCodexBin(route, () => this.manager.startSession({
-        name: clawName,
-        engine: 'codex',
-        cwd: s.cwd,
-        model: seat.model,
-        effort: seat.effort as any,
-        sandboxMode: CODEX_ACCESS[s.access].sandbox,
-        ignoreUserConfig: !s.useCodexConfig,
-        skipPersistence: true,
-        permissionMode: 'dontAsk',
-        ...(s.codexThreadId ? { resumeSessionId: s.codexThreadId } : {}),
-      }));
-    } else {
-      const a = CLAUDE_ACCESS[s.access];
-      if (!s.claudeSessionId) s.claudeSessionId = randomUUID();
-      claudeSink(s.claudeSessionId, (line) => this.onLine(s.id, line));
-      await this.manager.startSession({
-        name: clawName,
-        engine: 'claude',
-        cwd: s.cwd,
-        model: seat.model,
-        effort: seat.effort as any,
-        permissionMode: a.mode as any,
-        skipPersistence: true,
-        crossSessionInbound: 'refuse',
-        ...(s.claudeStarted ? { claudeResumeId: s.claudeSessionId } : { customSessionId: s.claudeSessionId }),
-        ...(a.prompts ? { permissionPromptTool: 'mcp__duo__approve', mcpConfig: this.mcpConfig(s.id) } : {}),
-        ...(seat.addDirs.length ? { addDir: seat.addDirs } : {}),
-      });
+    try {
+      if (seat.engine === 'codex') {
+        route = codexRoute(`chat-${s.id}-${Date.now().toString(36)}`, {
+          bin: this.bins.codex,
+          overrides: [...codexOverrides(seat), `shell_environment_policy.set={${DEPTH_VAR}="1"}`],
+          ignoreRules: false,
+          onLine: (line) => this.onLine(s.id, line),
+        });
+        await withCodexBin(route, () => this.manager.startSession({
+          name: clawName,
+          engine: 'codex',
+          cwd: s.cwd,
+          model: seat.model,
+          effort: seat.effort as any,
+          sandboxMode: CODEX_ACCESS[s.access].sandbox,
+          ignoreUserConfig: !s.useCodexConfig,
+          skipPersistence: true,
+          permissionMode: 'dontAsk',
+          ...(s.codexThreadId ? { resumeSessionId: s.codexThreadId } : {}),
+        }));
+      } else {
+        const a = CLAUDE_ACCESS[s.access];
+        if (!s.claudeSessionId) s.claudeSessionId = randomUUID();
+        claudeSink(s.claudeSessionId, (line) => this.onLine(s.id, line));
+        await this.manager.startSession({
+          name: clawName,
+          engine: 'claude',
+          cwd: s.cwd,
+          model: seat.model,
+          effort: seat.effort as any,
+          permissionMode: a.mode as any,
+          skipPersistence: true,
+          crossSessionInbound: 'refuse',
+          ...(s.claudeStarted ? { claudeResumeId: s.claudeSessionId } : { customSessionId: s.claudeSessionId }),
+          ...(a.prompts ? { permissionPromptTool: 'mcp__duo__approve', mcpConfig: this.mcpConfig(s.id) } : {}),
+          ...(seat.addDirs.length ? { addDir: seat.addDirs } : {}),
+        });
+      }
+    } catch (e) {
+      if (route) dropCodexRoute(route);
+      if (s.claudeSessionId) claudeSink(s.claudeSessionId, undefined);
+      await this.manager.stopSession(clawName).catch(() => undefined);
+      throw e;
     }
     this.live.set(s.id, { clawName, key, route });
     return clawName;
   }
 
   send(id: string, text: string): ChatTurn {
+    if (this.closing) throw new Error('the chat manager is closing');
     const s = this.get(id);
     if (this.running.has(id)) throw new Error('this chat is still working; stop it or wait');
     if (!text.trim()) throw new Error('empty message');
@@ -342,7 +369,19 @@ export class ChatManager {
     this.save(s);
     this.bus.emit({ t: 'chat_turn', chat: id, turn });
     this.bus.emit({ t: 'chat', chat: { ...this.summary(s), running: true } });
-    void this.runTurn(s, turn, text);
+    const task = this.runTurn(s, turn, text).catch(async (e) => {
+      const cur = this.current.get(id);
+      if (cur) clearTimeout(cur.timer);
+      this.current.delete(id);
+      await this.stopLive(id);
+      this.endTurn(s, turn, new Date(turn.at).getTime(), { error: (e as Error).message });
+    });
+    this.pending.set(id, task);
+    void task.then(() => this.pending.delete(id), (e) => {
+      this.pending.delete(id);
+      this.running.delete(id);
+      process.stderr.write(`chat ${id} cleanup failed: ${(e as Error).message}\n`);
+    });
     return turn;
   }
 
@@ -365,13 +404,20 @@ export class ChatManager {
     const started = Date.now();
     let stopped = false;
     let clawName = '';
-    this.running.set(s.id, { turn, stop: () => { stopped = true; } });
+    this.running.set(s.id, { turn, stop: () => {
+      stopped = true;
+      this.perms.cancelChat(s.id);
+      void this.stopLive(s.id);
+    } });
     try {
       clawName = await this.ensureLive(s);
     } catch (e) {
-      return this.endTurn(s, turn, started, { error: `could not start ${s.engine}: ${(e as Error).message}` });
+      return this.endTurn(s, turn, started, { stopped, error: `could not start ${s.engine}: ${(e as Error).message}` });
     }
-    if (stopped) return this.endTurn(s, turn, started, { stopped: true });
+    if (stopped) {
+      await this.stopLive(s.id);
+      return this.endTurn(s, turn, started, { stopped: true });
+    }
 
     const fresh = () => {
       const translator = s.engine === 'claude' ? new ClaudeTranslator() : new CodexTranslator();
@@ -379,17 +425,6 @@ export class ChatManager {
       return translator;
     };
     let translator = fresh();
-    this.running.set(s.id, {
-      turn,
-      stop: () => {
-        stopped = true;
-        this.perms.cancelChat(s.id);
-        const l = this.live.get(s.id);
-        this.live.delete(s.id);
-        void this.manager.stopSession(clawName).catch(() => undefined);
-        if (l?.route) dropCodexRoute(l.route);
-      },
-    });
 
     const attempt = async (): Promise<string | undefined> => {
       try {
@@ -406,8 +441,11 @@ export class ChatManager {
         if (s.engine === 'claude' && translator.facts.sessionId) s.claudeStarted = true;
         if (s.engine === 'claude' && s.turns.length > 1) s.claudeStarted = true;
         clawName = await this.ensureLive(s, true);
-        translator = fresh();
-        error = await attempt();
+        if (stopped) await this.stopLive(s.id);
+        else {
+          translator = fresh();
+          error = await attempt();
+        }
       } catch (e) {
         error = `restart failed: ${(e as Error).message}`;
       }
@@ -424,7 +462,10 @@ export class ChatManager {
     if (f.threadId) s.codexThreadId = f.threadId;
     if (s.engine === 'claude' && f.sessionId) s.claudeStarted = true;
     if (f.rateLimits) saveClaudeQuota(f.rateLimits);
-    this.endTurn(s, turn, started, { stopped, error: f.error ?? error, usage: f.usage, costUsd: f.costUsd });
+    // Match run turns: explicit CLI completion can supersede a recoverable transport error,
+    // while partial text alone cannot turn a failure into a success.
+    const completed = f.completed && turn.blocks.some((b) => b.kind === 'text' && b.text);
+    this.endTurn(s, turn, started, { stopped, error: f.error ?? (completed ? undefined : error), usage: f.usage, costUsd: f.costUsd });
   }
 
   private endTurn(s: ChatSession, turn: ChatTurn, started: number, o: { stopped?: boolean; error?: string; usage?: Usage; costUsd?: number }): void {
@@ -449,13 +490,13 @@ export class ChatManager {
       turn.usd = o.costUsd >= prev ? o.costUsd - prev : o.costUsd;
       s.claudeCost = o.costUsd;
     }
-    const answered = turn.blocks.some((b) => b.kind === 'text' && b.text);
-    turn.status = o.stopped ? 'stopped' : o.error && !answered ? 'error' : 'done';
+    turn.status = o.stopped ? 'stopped' : o.error ? 'error' : 'done';
     if (!o.stopped && o.error) {
       turn.error = o.error;
       turn.hint = errorHint(o.error);
     }
     s.updatedAt = new Date().toISOString();
+    if (this.sessions.get(s.id) !== s) return;
     this.save(s);
     this.bus.emit({ t: 'chat_turn_end', chat: s.id, turn });
     this.bus.emit({ t: 'chat', chat: this.summary(s) });
@@ -463,7 +504,15 @@ export class ChatManager {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     for (const r of this.running.values()) r.stop();
+    await Promise.allSettled(this.pending.values());
+    await Promise.all([...this.live.keys()].map((id) => this.stopLive(id)));
     await this.manager.shutdown().catch(() => undefined);
+    for (const s of this.sessions.values()) {
+      if (s.claudeSessionId) claudeSink(s.claudeSessionId, undefined);
+      this.perms.cancelChat(s.id);
+      rmSync(join(MCP_DIR, `${s.id}.json`), { force: true });
+    }
   }
 }

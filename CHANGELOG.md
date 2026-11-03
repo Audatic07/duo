@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Stop late-starting chat sessions on cancellation or shutdown; prevent deleted chats from being saved again by a finishing turn, and remove their raw streams and permission state.
+- Show failed chat turns as errors even when they produced partial text.
+- Restrict token-bearing permission MCP files to owner access on POSIX systems, repair older file permissions, and remove the files on normal shutdown.
+- Run Claude Code updates and version probes asynchronously, sharing concurrent update requests so streaming and Stop requests remain responsive.
+- Disconnect stalled SSE readers when their pending buffer exceeds 1 MiB, allowing the window to reconnect without retaining an unbounded queue.
+- Parse Git's NUL-delimited rename/copy source paths correctly in the Changes panel.
+
 ## 0.3.0 — 2026-10-08
 
 - **Custom Templates are the universal foundation for every Duo method.** Pair, Debate, Review, Council and Ask are fully constructed as templates in the same system, and all five can be recreated from a new method in the visual maker.

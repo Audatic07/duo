@@ -13,6 +13,12 @@ if (args[0] === 'auth') {
   console.log(JSON.stringify({ loggedIn: true, authMethod: 'fake' }));
   process.exit(0);
 }
+if (args[0] === 'update') {
+  record({ cli: 'claude', action: 'update' });
+  await new Promise((r) => setTimeout(r, Number(process.env.FAKE_CLAUDE_UPDATE_MS ?? 0)));
+  console.log('Fake Claude updated');
+  process.exit(0);
+}
 const sid = valueOf(args, '--session-id') ?? valueOf(args, '--resume') ?? 'fake-session';
 const schema = valueOf(args, '--json-schema');
 const mode = process.env.FAKE_CLAUDE_MODE ?? '';
